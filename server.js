@@ -10,7 +10,7 @@ app.use(cors());
 app.use(express.json());
 
 // Proxy endpoint for Polymarket API
-app.get('/api/markets', async (req, res) => {
+app.get('/api/data', async (req, res) => {
     try {
         const { tag_id, limit = 20, active = 'true', closed = 'false' } = req.query;
 
@@ -50,5 +50,5 @@ app.get('/api/health', (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`🚀 Proxy server running on http://localhost:${PORT}`);
-    console.log(`📊 Markets endpoint: http://localhost:${PORT}/api/markets`);
+    console.log(`📊 Markets endpoint: http://localhost:${PORT}/api/data`);
 });

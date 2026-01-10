@@ -18,16 +18,26 @@ function App() {
     setError(null)
 
     try {
-      // Fetch BTC Up/Down 15-minute markets via our proxy server
-      const response = await fetch(
-        `http://localhost:3001/api/markets?tag_id=102467&limit=20&_t=${Date.now()}`
-      )
+      // Fetch BTC Up/Down 15-minute markets directly from Polymarket API
+      const url = new URL('https://gamma-api.polymarket.com/events')
+      url.searchParams.append('active', 'true')
+      url.searchParams.append('closed', 'false')
+      url.searchParams.append('limit', '20')
+      url.searchParams.append('tag_id', '102467')
+
+      const response = await fetch(url.toString())
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
       }
 
-      const data = await response.json()
+      const allData = await response.json()
+
+      // Filter for Bitcoin Up or Down markets
+      const data = allData.filter(event =>
+        event.title.toLowerCase().includes('bitcoin') &&
+        event.title.toLowerCase().includes('up or down')
+      )
 
       // Fetch live prices for each market from CLOB
       const marketsWithLivePrices = await Promise.all(
@@ -37,18 +47,28 @@ function App() {
 
           try {
             const tokenIds = JSON.parse(market.clobTokenIds || '[]')
+            const originalPrices = JSON.parse(market.outcomePrices || '[]')
             const livePrices = []
 
             // Fetch live price for each outcome
-            for (const tokenId of tokenIds) {
-              const priceResponse = await fetch(
-                `https://clob.polymarket.com/price?token_id=${tokenId}&side=buy`
-              )
-              if (priceResponse.ok) {
-                const priceData = await priceResponse.json()
-                livePrices.push(priceData.price || '0')
-              } else {
-                livePrices.push('0')
+            for (let i = 0; i < tokenIds.length; i++) {
+              const tokenId = tokenIds[i]
+              try {
+                const priceResponse = await fetch(
+                  `https://clob.polymarket.com/price?token_id=${tokenId}&side=buy`,
+                  { signal: AbortSignal.timeout(5000) } // 5 second timeout
+                )
+                if (priceResponse.ok) {
+                  const priceData = await priceResponse.json()
+                  livePrices.push(priceData.price || originalPrices[i] || '0')
+                } else {
+                  // Use original price if CLOB fails (e.g., 404)
+                  livePrices.push(originalPrices[i] || '0')
+                }
+              } catch (fetchErr) {
+                // Use original price on timeout or network error
+                console.warn(`CLOB price fetch failed for token ${tokenId}:`, fetchErr.message)
+                livePrices.push(originalPrices[i] || '0')
               }
             }
 
