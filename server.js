@@ -5,9 +5,25 @@ import fetch from 'node-fetch';
 const app = express();
 const PORT = 3001;
 
-// Enable CORS for all routes
-app.use(cors());
+// Enable CORS for all routes with explicit options
+app.use(cors({
+    origin: '*', // Allow all origins
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
+
+// Root endpoint to verify server is running
+app.get('/', (req, res) => {
+    res.json({
+        status: 'ok',
+        message: 'Polymarket proxy server is running',
+        endpoints: {
+            health: '/api/health',
+            data: '/api/data'
+        }
+    });
+});
 
 // Proxy endpoint for Polymarket API
 app.get('/api/data', async (req, res) => {
@@ -48,7 +64,13 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', message: 'Polymarket proxy server is running' });
 });
 
-app.listen(PORT, () => {
-    console.log(`🚀 Proxy server running on http://localhost:${PORT}`);
-    console.log(`📊 Markets endpoint: http://localhost:${PORT}/api/data`);
-});
+// Start server only in local development (not on Vercel)
+if (process.env.NODE_ENV !== 'production') {
+    app.listen(PORT, () => {
+        console.log(`🚀 Proxy server running on http://localhost:${PORT}`);
+        console.log(`📊 Markets endpoint: http://localhost:${PORT}/api/data`);
+    });
+}
+
+// Export for Vercel serverless
+export default app;

@@ -18,26 +18,17 @@ function App() {
     setError(null)
 
     try {
-      // Fetch BTC Up/Down 15-minute markets directly from Polymarket API
-      const url = new URL('https://gamma-api.polymarket.com/events')
-      url.searchParams.append('active', 'true')
-      url.searchParams.append('closed', 'false')
-      url.searchParams.append('limit', '20')
-      url.searchParams.append('tag_id', '102467')
-
-      const response = await fetch(url.toString())
+      // Use proxy server to avoid CORS issues
+      const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
+      const response = await fetch(
+        `${API_URL}/api/data?tag_id=102467&limit=20&_t=${Date.now()}`
+      )
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
       }
 
-      const allData = await response.json()
-
-      // Filter for Bitcoin Up or Down markets
-      const data = allData.filter(event =>
-        event.title.toLowerCase().includes('bitcoin') &&
-        event.title.toLowerCase().includes('up or down')
-      )
+      const data = await response.json()
 
       // Fetch live prices for each market from CLOB
       const marketsWithLivePrices = await Promise.all(
