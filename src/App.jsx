@@ -21,7 +21,7 @@ function App() {
       // Use proxy server to avoid CORS issues
       const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
       const response = await fetch(
-        `${API_URL}/api/data?tag_id=102467&limit=20&_t=${Date.now()}`
+        `${API_URL}/api/data?tag_id=102467&limit=100&_t=${Date.now()}`
       )
 
       if (!response.ok) {
