@@ -1,0 +1,297 @@
+import { useState, useEffect } from 'react'
+import './App.css'
+
+function App() {
+  const [markets, setMarkets] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+  const [lastUpdate, setLastUpdate] = useState(null)
+  const [autoRefresh, setAutoRefresh] = useState(false)
+  const [refreshInterval, setRefreshInterval] = useState(30) // seconds
+
+  const fetchMarkets = async () => {
+    setLoading(true)
+    setError(null)
+
+    try {
+      // Fetch BTC Up/Down 15-minute markets via our proxy server
+      const response = await fetch(
+        `http://localhost:3001/api/markets?tag_id=102467&limit=20&_t=${Date.now()}`
+      )
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+
+      const data = await response.json()
+
+      // Fetch live prices for each market from CLOB
+      const marketsWithLivePrices = await Promise.all(
+        data.map(async (event) => {
+          const market = event.markets?.[0]
+          if (!market) return event
+
+          try {
+            const tokenIds = JSON.parse(market.clobTokenIds || '[]')
+            const livePrices = []
+
+            // Fetch live price for each outcome
+            for (const tokenId of tokenIds) {
+              const priceResponse = await fetch(
+                `https://clob.polymarket.com/price?token_id=${tokenId}&side=buy`
+              )
+              if (priceResponse.ok) {
+                const priceData = await priceResponse.json()
+                livePrices.push(priceData.price || '0')
+              } else {
+                livePrices.push('0')
+              }
+            }
+
+            // Update market with live prices
+            return {
+              ...event,
+              markets: [{
+                ...market,
+                outcomePrices: JSON.stringify(livePrices),
+                livePrices: livePrices,
+                lastUpdated: new Date().toISOString()
+              }]
+            }
+          } catch (err) {
+            console.error('Error fetching live prices:', err)
+            return event
+          }
+        })
+      )
+
+      setMarkets(marketsWithLivePrices)
+      setLastUpdate(new Date().toLocaleTimeString())
+    } catch (err) {
+      setError(err.message)
+      console.error('Error fetching markets:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const calculateProfit = (price) => {
+    if (!price || price === 0) return { shares: 0, profit: 0 }
+    const priceNum = parseFloat(price)
+    if (priceNum === 0) return { shares: 0, profit: 0 }
+    const shares = 1.0 / priceNum
+    const profit = shares - 1.0
+    return { shares, profit }
+  }
+
+  // Auto-refresh effect
+  useEffect(() => {
+    let intervalId
+    if (autoRefresh && markets.length > 0) {
+      intervalId = setInterval(() => {
+        fetchMarkets()
+      }, refreshInterval * 1000)
+    }
+    return () => {
+      if (intervalId) clearInterval(intervalId)
+    }
+  }, [autoRefresh, refreshInterval, markets.length])
+
+  return (
+    <div className="app">
+      <header className="header">
+        <div className="header-content">
+          <h1>🪙 Bitcoin Up/Down Markets</h1>
+          <p className="subtitle">15-Minute Prediction Markets on Polymarket</p>
+        </div>
+      </header>
+
+      <div className="container">
+        <div className="controls">
+          <button
+            onClick={fetchMarkets}
+            disabled={loading}
+            className="fetch-button"
+          >
+            {loading ? (
+              <>
+                <span className="spinner"></span>
+                Fetching...
+              </>
+            ) : (
+              <>
+                <span className="icon">🔄</span>
+                Fetch Market Data
+              </>
+            )}
+          </button>
+
+          <div className="auto-refresh-controls">
+            <label className="toggle-label">
+              <input
+                type="checkbox"
+                checked={autoRefresh}
+                onChange={(e) => setAutoRefresh(e.target.checked)}
+                className="toggle-checkbox"
+              />
+              <span className="toggle-text">
+                🔄 Auto-refresh every {refreshInterval}s
+              </span>
+            </label>
+
+            {autoRefresh && (
+              <select
+                value={refreshInterval}
+                onChange={(e) => setRefreshInterval(Number(e.target.value))}
+                className="interval-select"
+              >
+                <option value={10}>10 seconds</option>
+                <option value={30}>30 seconds</option>
+                <option value={60}>1 minute</option>
+              </select>
+            )}
+          </div>
+
+          {lastUpdate && (
+            <p className="last-update">
+              Last updated: <strong>{lastUpdate}</strong>
+              {autoRefresh && <span className="live-indicator"> 🟢 LIVE</span>}
+            </p>
+          )}
+        </div>
+
+        {error && (
+          <div className="error-card">
+            <span className="error-icon">⚠️</span>
+            <p>Error: {error}</p>
+          </div>
+        )}
+
+        {markets.length === 0 && !loading && !error && (
+          <div className="empty-state">
+            <div className="empty-icon">📊</div>
+            <h3>No Markets Loaded</h3>
+            <p>Click "Fetch Market Data" to load active Bitcoin Up/Down markets</p>
+          </div>
+        )}
+
+        {markets.length > 0 && (
+          <div className="timeline-container">
+            <h2 className="timeline-header">
+              <span className="timeline-icon">⏰</span>
+              Market Timeline
+              <span className="market-count">{markets.length} active markets</span>
+            </h2>
+
+            <div className="timeline-carousel">
+              {markets
+                .sort((a, b) => new Date(a.endDate) - new Date(b.endDate))
+                .map((event, index) => {
+                  const market = event.markets?.[0]
+                  if (!market) return null
+
+                  const outcomes = JSON.parse(market.outcomes || '[]')
+                  const prices = JSON.parse(market.outcomePrices || '[]')
+                  const endTime = new Date(event.endDate)
+                  const now = new Date()
+                  const timeUntilEnd = Math.max(0, endTime - now)
+                  const minutesUntilEnd = Math.floor(timeUntilEnd / 60000)
+                  const isClosingSoon = minutesUntilEnd < 5
+
+                  return (
+                    <div key={event.id} className="timeline-card">
+                      {/* Timeline indicator */}
+                      <div className={`timeline-indicator ${isClosingSoon ? 'closing-soon' : ''}`}>
+                        <div className="time-badge">
+                          {minutesUntilEnd < 1 ? (
+                            <span className="closing-now">CLOSING NOW!</span>
+                          ) : minutesUntilEnd < 60 ? (
+                            <span>{minutesUntilEnd}m</span>
+                          ) : (
+                            <span>{Math.floor(minutesUntilEnd / 60)}h {minutesUntilEnd % 60}m</span>
+                          )}
+                        </div>
+                        <div className="timeline-dot"></div>
+                        <div className="timeline-line"></div>
+                      </div>
+
+                      {/* Market card content */}
+                      <div className="market-card-timeline">
+                        <div className="market-header">
+                          <h3 className="market-title-compact">{event.title}</h3>
+                          <div className="market-meta">
+                            <span className="meta-item">
+                              🎯 {endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="outcomes-compact">
+                          {outcomes.map((outcome, idx) => {
+                            const price = parseFloat(prices[idx] || 0)
+                            const probability = price * 100
+                            const { shares, profit } = calculateProfit(price)
+
+                            return (
+                              <div
+                                key={idx}
+                                className={`outcome-card-compact ${outcome.toLowerCase()}`}
+                              >
+                                <div className="outcome-header-compact">
+                                  <span className="outcome-icon">
+                                    {outcome === 'Up' ? '📈' : '📉'}
+                                  </span>
+                                  <h4 className="outcome-name-compact">{outcome.toUpperCase()}</h4>
+                                  <span className="probability-compact">{probability.toFixed(1)}%</span>
+                                </div>
+
+                                <div className="outcome-stats">
+                                  <div className="stat-compact">
+                                    <span className="stat-label-compact">Price</span>
+                                    <span className="stat-value-compact">${price.toFixed(3)}</span>
+                                  </div>
+                                  <div className="stat-compact highlight-stat">
+                                    <span className="stat-label-compact">$1 → Profit</span>
+                                    <span className="profit-value-compact">${profit.toFixed(2)}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+
+                        <div className="market-footer">
+                          <div className="volume-indicator">
+                            <span className="volume-label">Vol:</span>
+                            <span className="volume-value">
+                              ${(market.volumeNum || 0).toLocaleString(undefined, {
+                                maximumFractionDigits: 0
+                              })}
+                            </span>
+                          </div>
+                          <a
+                            href={`https://polymarket.com/event/${event.slug}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="trade-link-compact"
+                          >
+                            Trade →
+                          </a>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+            </div>
+
+            <div className="scroll-hint">
+              ← Scroll to see more markets →
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default App
