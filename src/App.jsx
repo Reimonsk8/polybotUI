@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react'
 import './App.css'
+import MarketChart from './MarketChart'
+import MiniChart from './MiniChart'
 
 function App() {
   const [markets, setMarkets] = useState([])
@@ -8,6 +10,8 @@ function App() {
   const [lastUpdate, setLastUpdate] = useState(null)
   const [autoRefresh, setAutoRefresh] = useState(false)
   const [refreshInterval, setRefreshInterval] = useState(30) // seconds
+  const [expandedMarketId, setExpandedMarketId] = useState(null) // For inline mini chart
+  const [modalMarket, setModalMarket] = useState(null) // For full modal
 
   const fetchMarkets = async () => {
     setLoading(true)
@@ -223,6 +227,15 @@ function App() {
                             <span className="meta-item">
                               🎯 {endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                             </span>
+                            <button
+                              className="chart-toggle-btn"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setExpandedMarketId(expandedMarketId === market.id ? null : market.id)
+                              }}
+                            >
+                              {expandedMarketId === market.id ? '📊 Hide Chart' : '📊 Show Chart'}
+                            </button>
                           </div>
                         </div>
 
@@ -260,6 +273,14 @@ function App() {
                           })}
                         </div>
 
+                        {/* Mini Chart - shown when expanded */}
+                        {expandedMarketId === market.id && (
+                          <MiniChart
+                            market={market}
+                            onClick={() => setModalMarket(market)}
+                          />
+                        )}
+
                         <div className="market-footer">
                           <div className="volume-indicator">
                             <span className="volume-label">Vol:</span>
@@ -290,6 +311,14 @@ function App() {
           </div>
         )}
       </div>
+
+      {/* Market Chart Modal */}
+      {modalMarket && (
+        <MarketChart
+          market={modalMarket}
+          onClose={() => setModalMarket(null)}
+        />
+      )}
     </div>
   )
 }

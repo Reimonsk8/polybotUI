@@ -1,0 +1,68 @@
+/* Mini Chart Container */
+.mini-chart-container {
+    margin-top: 1rem;
+    padding: 0.75rem;
+    background: var(--bg-primary);
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.mini-chart-container:hover {
+    border-color: var(--accent-primary);
+    box-shadow: 0 4px 15px rgba(99, 102, 241, 0.2);
+    transform: translateY(-2px);
+}
+
+.mini-chart-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.mini-chart-label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.mini-status {
+    font-size: 0.7rem;
+}
+
+.mini-status.connected {
+    animation: pulse-mini 2s ease-in-out infinite;
+}
+
+@keyframes pulse-mini {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.5;
+    }
+}
+
+.mini-chart {
+    height: 80px;
+    margin: 0.5rem 0;
+}
+
+.mini-chart-hint {
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-top: 0.5rem;
+    opacity: 0.7;
+    transition: opacity 0.3s ease;
+}
+
+.mini-chart-container:hover .mini-chart-hint {
+    opacity: 1;
+    color: var(--accent-primary);
+}
