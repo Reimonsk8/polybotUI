@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import './App.css'
 import MarketChart from './MarketChart'
 import MiniChart from './MiniChart'
+import UserPortfolio from './UserPortfolio'
 
 function App() {
   const [markets, setMarkets] = useState([])
@@ -122,6 +123,8 @@ function App() {
       </header>
 
       <div className="container">
+        <UserPortfolio />
+
         <div className="controls">
           <button
             onClick={fetchMarkets}
