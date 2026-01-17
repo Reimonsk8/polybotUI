@@ -130,6 +130,11 @@
     width: 100%;
     max-width: 400px;
     text-align: center;
+    margin-bottom: 1rem;
+}
+
+.connect-button.email-btn {
+    margin-bottom: 1.5rem;
 }
 
 .email-login-form h4 {
@@ -348,4 +353,229 @@ tr:last-child td {
     padding: 2rem;
     color: #666;
     font-style: italic;
+}
+
+/* Refresh Button */
+.refresh-btn {
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    /* fallback for var(--accent-primary/secondary) */
+    background: linear-gradient(135deg, var(--accent-primary, #6366f1), var(--accent-secondary, #8b5cf6));
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-right: 10px;
+}
+
+.refresh-btn:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(99, 102, 241, 0.5);
+    filter: brightness(1.1);
+}
+
+.refresh-btn:disabled {
+    opacity: 0.7;
+    cursor: wait;
+    transform: none;
+}
+
+/* Tabs */
+.portfolio-tabs {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1.5rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    padding-bottom: 0.5rem;
+}
+
+.tab-btn {
+    background: transparent;
+    border: none;
+    color: #888;
+    /* text-secondary */
+    font-size: 1rem;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 10px 20px;
+    border-radius: 8px;
+    transition: all 0.2s ease;
+    position: relative;
+}
+
+.tab-btn:hover {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.tab-btn.active {
+    color: #fff;
+    background: rgba(99, 102, 241, 0.15);
+    /* accent-primary with opacity */
+    font-weight: 600;
+}
+
+.tab-btn.active::after {
+    content: '';
+    position: absolute;
+    bottom: -9px;
+    /* Pushes it down to overlap the container border */
+    left: 0;
+    width: 100%;
+    height: 3px;
+    background: linear-gradient(90deg, var(--accent-primary, #6366f1), var(--accent-secondary, #8b5cf6));
+    border-top-left-radius: 3px;
+    border-top-right-radius: 3px;
+    box-shadow: 0 -2px 8px rgba(99, 102, 241, 0.5);
+}
+
+/* Enhancing Disconnect Button to match */
+.disconnect-btn {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #aaa;
+    padding: 8px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 500;
+    transition: all 0.2s;
+    height: fit-content;
+}
+
+.disconnect-btn:hover {
+    background: rgba(239, 68, 68, 0.1);
+    /* danger color tint */
+    border-color: rgba(239, 68, 68, 0.4);
+    color: #ff6b6b;
+}
+
+.header-right {
+    display: flex;
+    align-items: center;
+}
+
+/* Activity Table Styles */
+.activity-table th {
+    font-size: 0.8rem;
+    color: #666;
+    letter-spacing: 0.5px;
+}
+
+.text-right {
+    text-align: right;
+}
+
+.activity-cell,
+.market-cell,
+.value-cell {
+    padding: 12px 0;
+}
+
+.activity-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.activity-icon {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: bold;
+    color: white;
+}
+
+.activity-icon.buy {
+    background: #2ecc71;
+}
+
+.activity-icon.sell {
+    background: #555;
+}
+
+.activity-type {
+    font-weight: 600;
+    font-size: 0.95rem;
+}
+
+.market-row-content {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.mini-icon {
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+}
+
+.market-details {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.market-title-text {
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 250px;
+}
+
+.market-sub {
+    font-size: 0.8rem;
+    color: #888;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.outcome-text.text-green {
+    color: #2ecc71;
+    font-weight: 600;
+}
+
+.outcome-text.text-red {
+    color: #e74c3c;
+    font-weight: 600;
+}
+
+.price-info::after {
+    content: "•";
+    margin-left: 6px;
+    opacity: 0.5;
+}
+
+.value-amount {
+    font-size: 0.95rem;
+    font-weight: 600;
+}
+
+.value-amount.pos {
+    color: #2ecc71;
+}
+
+.value-amount.neg {
+    color: #fff;
+}
+
+.time-ago {
+    font-size: 0.8rem;
+    color: #666;
 }

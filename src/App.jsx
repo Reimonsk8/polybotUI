@@ -100,6 +100,11 @@ function App() {
     return { shares, profit }
   }
 
+  // Fetch on mount
+  useEffect(() => {
+    fetchMarkets()
+  }, [])
+
   // Auto-refresh effect
   useEffect(() => {
     let intervalId
@@ -115,35 +120,10 @@ function App() {
 
   return (
     <div className="app">
-      <header className="header">
-        <div className="header-content">
-          <h1>🪙 Bitcoin Up/Down Markets</h1>
-          <p className="subtitle">15-Minute Prediction Markets on Polymarket</p>
-        </div>
-      </header>
-
       <div className="container">
         <UserPortfolio />
 
         <div className="controls">
-          <button
-            onClick={fetchMarkets}
-            disabled={loading}
-            className="fetch-button"
-          >
-            {loading ? (
-              <>
-                <span className="spinner"></span>
-                Fetching...
-              </>
-            ) : (
-              <>
-                <span className="icon">🔄</span>
-                Fetch Market Data
-              </>
-            )}
-          </button>
-
           <div className="auto-refresh-controls">
             <label className="toggle-label">
               <input
@@ -189,7 +169,7 @@ function App() {
           <div className="empty-state">
             <div className="empty-icon">📊</div>
             <h3>No Markets Loaded</h3>
-            <p>Click "Fetch Market Data" to load active Bitcoin Up/Down markets</p>
+            <p>Waiting for data...</p>
           </div>
         )}
 
