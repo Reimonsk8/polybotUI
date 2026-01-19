@@ -20,6 +20,98 @@ const UserPortfolio = () => {
     const [error, setError] = useState(null)
     const [client, setClient] = useState(null)
 
+    // Session management constants
+    const SESSION_KEY = 'polymarket_session'
+    const INACTIVITY_TIMEOUT = 30 * 60 * 1000 // 30 minutes in milliseconds
+
+    // Restore session on mount
+    useEffect(() => {
+        const savedSession = localStorage.getItem(SESSION_KEY)
+        if (savedSession) {
+            try {
+                const session = JSON.parse(savedSession)
+                const now = Date.now()
+
+                // Check if session is still valid (not expired)
+                if (session.expiresAt && now < session.expiresAt) {
+                    // Restore session data
+                    setAddress(session.address)
+                    setUsername(session.username)
+                    setProfileImage(session.profileImage)
+                    setCashBalance(session.cashBalance)
+                    setLoginMethod(session.loginMethod)
+                    setIsL2Authenticated(session.isL2Authenticated)
+
+                    // Re-authenticate with saved private key if available
+                    if (session.privateKey) {
+                        connectPrivateKey(session.privateKey, session.proxyAddress)
+                    }
+                } else {
+                    // Session expired, clear it
+                    localStorage.removeItem(SESSION_KEY)
+                }
+            } catch (err) {
+                // Invalid session data, clear it
+                localStorage.removeItem(SESSION_KEY)
+            }
+        }
+    }, [])
+
+    // Track user activity and update session expiry
+    useEffect(() => {
+        if (!address) return
+
+        let inactivityTimer
+
+        const resetInactivityTimer = () => {
+            clearTimeout(inactivityTimer)
+
+            // Update session expiry
+            const savedSession = localStorage.getItem(SESSION_KEY)
+            if (savedSession) {
+                try {
+                    const session = JSON.parse(savedSession)
+                    session.expiresAt = Date.now() + INACTIVITY_TIMEOUT
+                    localStorage.setItem(SESSION_KEY, JSON.stringify(session))
+                } catch (err) {
+                    // Ignore
+                }
+            }
+
+            // Set new timeout for auto-logout
+            inactivityTimer = setTimeout(() => {
+                disconnect()
+                alert('Session expired due to inactivity. Please log in again.')
+            }, INACTIVITY_TIMEOUT)
+        }
+
+        // Activity event listeners
+        const events = ['mousedown', 'keydown', 'scroll', 'touchstart']
+        events.forEach(event => {
+            document.addEventListener(event, resetInactivityTimer)
+        })
+
+        // Initialize timer
+        resetInactivityTimer()
+
+        // Cleanup
+        return () => {
+            clearTimeout(inactivityTimer)
+            events.forEach(event => {
+                document.removeEventListener(event, resetInactivityTimer)
+            })
+        }
+    }, [address])
+
+    // Save session to localStorage
+    const saveSession = (sessionData) => {
+        const session = {
+            ...sessionData,
+            expiresAt: Date.now() + INACTIVITY_TIMEOUT
+        }
+        localStorage.setItem(SESSION_KEY, JSON.stringify(session))
+    }
+
     // Authenticate L2 & Fetch Private Data
     const performL2Login = async (signer, userAddress, authType, proxyAddressOverride = null) => {
         try {
@@ -226,6 +318,18 @@ const UserPortfolio = () => {
             // Perform L2 login
             await performL2Login(wallet, userAddress, 'l1', proxyAddressInput)
 
+            // Save session after successful login
+            saveSession({
+                address: userAddress,
+                username,
+                profileImage,
+                cashBalance,
+                loginMethod: 'l1',
+                isL2Authenticated,
+                privateKey: privateKeyInput,
+                proxyAddress: proxyAddressInput
+            })
+
         } catch (err) {
             setError(err.message)
         } finally {
@@ -325,6 +429,10 @@ const UserPortfolio = () => {
     }
 
     const disconnect = () => {
+        // Clear session from localStorage
+        localStorage.removeItem(SESSION_KEY)
+
+        // Clear state
         setAddress(null)
         setUsername(null)
         setProfileImage(null)
