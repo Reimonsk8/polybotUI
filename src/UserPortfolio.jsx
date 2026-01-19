@@ -214,10 +214,17 @@ const UserPortfolio = () => {
             // 7. Fetch Profile Logic
             let profileFound = false
 
-            // Try Gamma API (via Proxy)
+            // Try Gamma API (via Proxy if available, otherwise direct)
             try {
-                // Direct call to Gamma API (works on GitHub Pages)
-                const profileRes = await fetch(`https://gamma-api.polymarket.com/public-profile?address=${userAddress}`)
+                // Use proxy if VITE_PROXY_API_URL is set, otherwise try direct (will fail on GitHub Pages due to CORS)
+                const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
+                const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
+
+                const profileUrl = useProxy
+                    ? `${proxyUrl}/gamma-api/public-profile?address=${userAddress}`
+                    : `https://gamma-api.polymarket.com/public-profile?address=${userAddress}`
+
+                const profileRes = await fetch(profileUrl)
 
 
                 if (profileRes.ok) {
