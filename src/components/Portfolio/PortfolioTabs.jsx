@@ -9,10 +9,23 @@ const PortfolioTabs = ({ userAddress, client }) => {
     const [loading, setLoading] = useState(false)
     const [autoRefresh, setAutoRefresh] = useState(false)
 
-    // Fetch Active Bets with enriched market data from Gamma API
+    // Fetch Active Bets using L2 authenticated client
     const fetchActiveBets = async () => {
         try {
-            // First, get positions from Data API
+            if (!client) {
+                // Fallback to public API if no client
+                const response = await fetch(`https://data-api.polymarket.com/positions?user=${userAddress}`)
+                if (response.ok) {
+                    const positions = await response.json()
+                    setActiveBets(positions.filter(p => p.size > 0))
+                }
+                return
+            }
+
+            // Use L2 authenticated method to get open orders
+            const openOrders = await client.getOpenOrders()
+
+            // Also fetch positions from Data API for additional info
             const response = await fetch(`https://data-api.polymarket.com/positions?user=${userAddress}`)
             if (response.ok) {
                 const positions = await response.json()
@@ -28,7 +41,7 @@ const PortfolioTabs = ({ userAddress, client }) => {
                                 const marketData = await marketRes.json()
                                 return {
                                     ...position,
-                                    marketData, // Add full market metadata
+                                    marketData,
                                     icon: marketData.icon,
                                     description: marketData.description,
                                     category: marketData.category,
@@ -39,7 +52,7 @@ const PortfolioTabs = ({ userAddress, client }) => {
                         } catch (err) {
                             // Silently fail for individual market data
                         }
-                        return position // Return original if Gamma fetch fails
+                        return position
                     })
                 )
 
@@ -63,14 +76,22 @@ const PortfolioTabs = ({ userAddress, client }) => {
         }
     }
 
-    // Fetch Activity Log
+    // Fetch Activity Log using L2 authenticated client
     const fetchActivityLog = async () => {
         try {
-            const response = await fetch(`https://data-api.polymarket.com/activity?user=${userAddress}&limit=50&sortBy=TIMESTAMP&sortDirection=DESC`)
-            if (response.ok) {
-                const data = await response.json()
-                setActivityLog(data)
+            if (!client) {
+                // Fallback to public API if no client
+                const response = await fetch(`https://data-api.polymarket.com/activity?user=${userAddress}&limit=50&sortBy=TIMESTAMP&sortDirection=DESC`)
+                if (response.ok) {
+                    const data = await response.json()
+                    setActivityLog(data)
+                }
+                return
             }
+
+            // Use L2 authenticated method to get trades
+            const trades = await client.getTrades({ limit: 50 })
+            setActivityLog(trades)
         } catch (err) {
             // Silently fail
         }
