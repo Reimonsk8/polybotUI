@@ -342,31 +342,45 @@ const PortfolioTabs = ({ userAddress, client }) => {
                                     <div className="empty-state">No activity found.</div>
                                 ) : (
                                     <div className="activity-list">
-                                        {activityLog.map((activity, idx) => (
-                                            <div key={idx} className="activity-item">
-                                                <div className="activity-icon">
-                                                    {activity.type === 'TRADE' && (activity.side === 'BUY' ? '📈' : '📉')}
-                                                    {activity.type === 'REDEEM' && '💰'}
-                                                    {activity.type === 'REWARD' && '🎁'}
-                                                </div>
-                                                <div className="activity-details">
-                                                    <div className="activity-title">
-                                                        <span className="activity-type">{activity.type}</span>
-                                                        {activity.side && <span className={`activity-side ${activity.side.toLowerCase()}`}>{activity.side}</span>}
+                                        {activityLog.map((activity, idx) => {
+                                            // Handle both Data API format and Trade format from getTrades()
+                                            const isTrade = activity.match_time !== undefined
+                                            const side = activity.side || 'TRADE'
+                                            const type = activity.type || 'TRADE'
+                                            const amount = activity.size || activity.usdcSize
+                                            const timestamp = activity.match_time || activity.timestamp
+                                            const outcome = activity.outcome || ''
+
+                                            return (
+                                                <div key={activity.id || idx} className="activity-item">
+                                                    <div className="activity-icon">
+                                                        {side === 'BUY' && '📈'}
+                                                        {side === 'SELL' && '📉'}
+                                                        {type === 'REDEEM' && '💰'}
+                                                        {type === 'REWARD' && '🎁'}
                                                     </div>
-                                                    <div className="activity-market">{activity.title}</div>
-                                                    <div className="activity-outcome">{activity.outcome}</div>
-                                                </div>
-                                                <div className="activity-meta">
-                                                    <div className="activity-amount">
-                                                        {activity.usdcSize && formatCurrency(activity.usdcSize)}
+                                                    <div className="activity-details">
+                                                        <div className="activity-title">
+                                                            <span className="activity-type">{type}</span>
+                                                            {side && <span className={`activity-side ${side.toLowerCase()}`}>{side}</span>}
+                                                        </div>
+                                                        <div className="activity-market">{activity.title || outcome}</div>
+                                                        <div className="activity-outcome">{outcome}</div>
                                                     </div>
-                                                    <div className="activity-time">
-                                                        {formatDate(activity.timestamp)}
+                                                    <div className="activity-meta">
+                                                        <div className="activity-amount">
+                                                            {amount && `${parseFloat(amount).toFixed(2)} shares @ ${formatCurrency(activity.price || 0)}`}
+                                                        </div>
+                                                        <div className="activity-time">
+                                                            {timestamp && (isTrade
+                                                                ? new Date(timestamp).toLocaleString()
+                                                                : formatDate(timestamp)
+                                                            )}
+                                                        </div>
                                                     </div>
                                                 </div>
-                                            </div>
-                                        ))}
+                                            )
+                                        })}
                                     </div>
                                 )}
                             </div>
@@ -387,7 +401,7 @@ const PortfolioTabs = ({ userAddress, client }) => {
                     </label>
                 </div>
             </div>
-        </div>
+        </div >
     )
 }
 
