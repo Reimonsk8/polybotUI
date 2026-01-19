@@ -9,68 +9,136 @@ const PortfolioTabs = ({ userAddress, client }) => {
     const [loading, setLoading] = useState(false)
     const [autoRefresh, setAutoRefresh] = useState(false)
 
-    // Fetch Active Bets using L2 authenticated client
+    // Fetch Active Bets using L2 authenticated client methods
     const fetchActiveBets = async () => {
         try {
             if (!client) {
-                // Fallback to public API if no client
-                const response = await fetch(`https://data-api.polymarket.com/positions?user=${userAddress}`)
-                if (response.ok) {
-                    const positions = await response.json()
-                    setActiveBets(positions.filter(p => p.size > 0))
-                }
                 return
             }
 
-            // Use L2 authenticated method to get open orders
-            const openOrders = await client.getOpenOrders()
+            // Get open orders and recent trades to build position data
+            const [openOrders, trades] = await Promise.all([
+                client.getOpenOrders(),
+                client.getTrades({ limit: 100 })
+            ])
 
-            // Also fetch positions from Data API for additional info
-            const response = await fetch(`https://data-api.polymarket.com/positions?user=${userAddress}`)
-            if (response.ok) {
-                const positions = await response.json()
-                const activePositions = positions.filter(p => p.size > 0)
+            // Calculate positions from trades
+            const positionMap = new Map()
 
-                // Enrich each position with market metadata from Gamma API
-                const enrichedPositions = await Promise.all(
-                    activePositions.map(async (position) => {
-                        try {
-                            // Fetch market details from Gamma API using condition ID
-                            const marketRes = await fetch(`https://gamma-api.polymarket.com/markets/${position.conditionId}`)
-                            if (marketRes.ok) {
-                                const marketData = await marketRes.json()
-                                return {
-                                    ...position,
-                                    marketData,
-                                    icon: marketData.icon,
-                                    description: marketData.description,
-                                    category: marketData.category,
-                                    endDate: marketData.endDate,
-                                    volume: marketData.volume
-                                }
-                            }
-                        } catch (err) {
-                            // Silently fail for individual market data
-                        }
-                        return position
+            trades.forEach(trade => {
+                const key = `${trade.market}-${trade.asset_id}`
+                if (!positionMap.has(key)) {
+                    positionMap.set(key, {
+                        market: trade.market,
+                        asset_id: trade.asset_id,
+                        outcome: trade.outcome,
+                        size: 0,
+                        totalCost: 0,
+                        trades: []
                     })
-                )
+                }
 
-                setActiveBets(enrichedPositions)
-            }
+                const position = positionMap.get(key)
+                const tradeSize = parseFloat(trade.size)
+                const tradePrice = parseFloat(trade.price)
+
+                if (trade.side === 'BUY') {
+                    position.size += tradeSize
+                    position.totalCost += tradeSize * tradePrice
+                } else {
+                    position.size -= tradeSize
+                    position.totalCost -= tradeSize * tradePrice
+                }
+                position.trades.push(trade)
+            })
+
+            // Filter to only active positions (size > 0) and enrich with market data
+            const activePositions = Array.from(positionMap.values())
+                .filter(p => p.size > 0.001) // Small threshold for floating point
+                .map(p => ({
+                    ...p,
+                    avgPrice: p.totalCost / p.size,
+                    conditionId: p.market,
+                    title: p.outcome || 'Unknown Market'
+                }))
+
+            // Enrich with Gamma API market metadata
+            const enrichedPositions = await Promise.all(
+                activePositions.map(async (position) => {
+                    try {
+                        const marketRes = await fetch(`https://gamma-api.polymarket.com/markets/${position.conditionId}`)
+                        if (marketRes.ok) {
+                            const marketData = await marketRes.json()
+                            return {
+                                ...position,
+                                marketData,
+                                icon: marketData.icon,
+                                description: marketData.description,
+                                category: marketData.category,
+                                endDate: marketData.endDate,
+                                volume: marketData.volume,
+                                title: marketData.question || position.title
+                            }
+                        }
+                    } catch (err) {
+                        // Silently fail for individual market data
+                    }
+                    return position
+                })
+            )
+
+            setActiveBets(enrichedPositions)
         } catch (err) {
             // Silently fail
         }
     }
 
-    // Fetch Closed Positions
+    // Fetch Closed Positions using L2 authenticated trades
     const fetchClosedPositions = async () => {
         try {
-            const response = await fetch(`https://data-api.polymarket.com/v1/closed-positions?user=${userAddress}&limit=50`)
-            if (response.ok) {
-                const data = await response.json()
-                setClosedPositions(data)
+            if (!client) {
+                return
             }
+
+            // Get all trades and calculate closed positions
+            const trades = await client.getTrades({ limit: 200 })
+
+            // Group by market and calculate P&L
+            const positionMap = new Map()
+
+            trades.forEach(trade => {
+                const key = `${trade.market}-${trade.asset_id}`
+                if (!positionMap.has(key)) {
+                    positionMap.set(key, {
+                        market: trade.market,
+                        asset_id: trade.asset_id,
+                        outcome: trade.outcome,
+                        title: trade.outcome || 'Unknown',
+                        size: 0,
+                        pnl: 0,
+                        trades: []
+                    })
+                }
+
+                const position = positionMap.get(key)
+                const tradeSize = parseFloat(trade.size)
+                const tradePrice = parseFloat(trade.price)
+
+                if (trade.side === 'BUY') {
+                    position.size += tradeSize
+                    position.pnl -= tradeSize * tradePrice
+                } else {
+                    position.size -= tradeSize
+                    position.pnl += tradeSize * tradePrice
+                }
+                position.trades.push(trade)
+            })
+
+            // Filter to closed positions (size near 0)
+            const closedPositions = Array.from(positionMap.values())
+                .filter(p => Math.abs(p.size) < 0.001 && p.trades.length > 0)
+
+            setClosedPositions(closedPositions)
         } catch (err) {
             // Silently fail
         }
