@@ -38,6 +38,48 @@ const LoginForm = ({ onConnectPrivateKey, onConnectApiKey, onConnectFull, loadin
         if (import.meta.env.VITE_ADDRESS) setApiAddressInput(import.meta.env.VITE_ADDRESS) // Assuming VITE_ADDRESS might exist or user adds it
     }
 
+    // Handle custom .env file upload
+    const handleEnvFileUpload = (event) => {
+        const file = event.target.files[0]
+        if (!file) return
+
+        const reader = new FileReader()
+        reader.onload = (e) => {
+            const content = e.target.result
+            const lines = content.split('\n')
+
+            lines.forEach(line => {
+                const trimmed = line.trim()
+                if (!trimmed || trimmed.startsWith('#')) return // Skip empty lines and comments
+
+                const [key, ...valueParts] = trimmed.split('=')
+                const value = valueParts.join('=').trim().replace(/^["']|["']$/g, '') // Remove quotes
+
+                switch (key.trim()) {
+                    case 'VITE_PRIVATE_KEY':
+                        setPrivateKeyInput(value)
+                        break
+                    case 'VITE_PROXY_ADDRESS':
+                        setProxyAddressInput(value)
+                        break
+                    case 'VITE_API_KEY':
+                        setApiKeyInput(value)
+                        break
+                    case 'VITE_API_SECRET':
+                        setApiSecretInput(value)
+                        break
+                    case 'VITE_API_PASSPHRASE':
+                        setApiPassphraseInput(value)
+                        break
+                    case 'VITE_ADDRESS':
+                        setApiAddressInput(value)
+                        break
+                }
+            })
+        }
+        reader.readAsText(file)
+    }
+
     if (!showEmailLogin) {
         return (
             <div className="portfolio-login">
@@ -72,22 +114,53 @@ const LoginForm = ({ onConnectPrivateKey, onConnectApiKey, onConnectFull, loadin
                     Enter your credentials below. Get your Private Key from <strong>reveal.magic.link/polymarket</strong>
                 </p>
 
-                {/* Load from .env button */}
-                {(import.meta.env.VITE_PRIVATE_KEY || import.meta.env.VITE_API_KEY) && (
-                    <button
-                        onClick={loadFromEnv}
-                        className="connect-button"
-                        style={{
-                            background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
-                            marginBottom: '15px',
-                            fontSize: '0.9rem',
-                            padding: '10px 20px'
-                        }}
-                    >
-                        <span className="icon">📁</span>
-                        Load from .env File
-                    </button>
-                )}
+                {/* Load from .env or Upload custom .env */}
+                <div style={{ marginBottom: '15px' }}>
+                    {(import.meta.env.VITE_PRIVATE_KEY || import.meta.env.VITE_API_KEY) ? (
+                        <button
+                            onClick={loadFromEnv}
+                            className="connect-button"
+                            style={{
+                                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                                fontSize: '0.9rem',
+                                padding: '10px 20px',
+                                width: '100%'
+                            }}
+                        >
+                            <span className="icon">📁</span>
+                            Load from .env File
+                        </button>
+                    ) : (
+                        <div>
+                            <p style={{ fontSize: '0.85rem', color: '#f59e0b', marginBottom: '10px', textAlign: 'center' }}>
+                                ⚠️ No .env file detected
+                            </p>
+                            <label
+                                htmlFor="env-upload"
+                                className="connect-button"
+                                style={{
+                                    background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+                                    fontSize: '0.9rem',
+                                    padding: '10px 20px',
+                                    width: '100%',
+                                    display: 'block',
+                                    textAlign: 'center',
+                                    cursor: 'pointer'
+                                }}
+                            >
+                                <span className="icon">📤</span>
+                                Upload Custom .env File
+                            </label>
+                            <input
+                                id="env-upload"
+                                type="file"
+                                accept=".env"
+                                onChange={handleEnvFileUpload}
+                                style={{ display: 'none' }}
+                            />
+                        </div>
+                    )}
+                </div>
 
                 <h5 style={{ fontSize: '0.9rem', marginTop: '15px', marginBottom: '8px', color: '#ddd', textAlign: 'left' }}>Required:</h5>
                 <input
