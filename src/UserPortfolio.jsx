@@ -35,11 +35,9 @@ const UserPortfolio = () => {
                         const posData = await posRes.json()
                         if (posData.length > 0 && posData[0].proxyWallet) {
                             proxyAddress = posData[0].proxyWallet
-                            console.log("Found Proxy via Positions:", proxyAddress)
                         }
                     }
                 } catch (e) {
-                    console.warn("Proxy lookup from positions failed", e)
                 }
             }
 
@@ -51,40 +49,30 @@ const UserPortfolio = () => {
                         const actData = await actRes.json()
                         if (actData.length > 0 && actData[0].proxyWallet) {
                             proxyAddress = actData[0].proxyWallet
-                            console.log("Found Proxy via Activity:", proxyAddress)
                         }
                     }
                 } catch (e) {
-                    console.warn("Proxy lookup from activity failed", e)
                 }
             }
 
             // Final fallback to userAddress
             proxyAddress = proxyAddress || userAddress
-            console.log("Using proxy address:", proxyAddress)
 
             // Set a default username from address
             setUsername(userAddress.slice(0, 6) + '...' + userAddress.slice(-4))
 
             // 2. Init L1 Client
             // ChainId 137 for Polygon
-            console.log("🔑 [L1 AUTH] Initializing L1 Client...")
             const l1Client = new ClobClient("https://clob.polymarket.com", 137, signer)
-            console.log("✅ [L1 AUTH] L1 Client initialized successfully")
 
             // 3. Try to derive API Keys first (nonce 0), then create if needed
             let creds
             try {
-                console.log("🔑 [L1 AUTH] Attempting to derive existing API key...")
                 creds = await l1Client.deriveApiKey()
-                console.log("✅ [L1 AUTH] Successfully derived existing API key")
             } catch (deriveErr) {
-                console.warn("⚠️ [L1 AUTH] Derive failed, creating new API key:", deriveErr.message)
                 try {
                     creds = await l1Client.createApiKey()
-                    console.log("✅ [L1 AUTH] Successfully created new API key")
                 } catch (createErr) {
-                    console.error("❌ [L1 AUTH] Both derive and create failed:", createErr)
                     throw new Error("Could not obtain API credentials. " + createErr.message)
                 }
             }
@@ -103,10 +91,8 @@ const UserPortfolio = () => {
                 signatureType = 2
             }
 
-            console.log("🔧 [L2 AUTH] Using signature type:", signatureType, "Funder:", proxyAddress)
 
             // 5. Init L2 Client with full Auth
-            console.log("🔐 [L2 AUTH] Initializing L2 Client with API credentials...")
             const l2Client = new ClobClient(
                 "https://clob.polymarket.com",
                 137,
@@ -118,7 +104,6 @@ const UserPortfolio = () => {
 
             setClient(l2Client)
             setIsL2Authenticated(true)
-            console.log("✅ [L2 AUTH] L2 Client initialized successfully - FULL L2 AUTHENTICATION ACTIVE")
 
             // 6. Fetch Balance
             try {
@@ -130,14 +115,11 @@ const UserPortfolio = () => {
                 const rawBalance = balanceData.balance || "0"
                 const readable = parseFloat(rawBalance) / 1000000
                 setCashBalance(readable)
-                console.log("Balance fetched successfully:", readable)
             } catch (balanceErr) {
-                console.error("Balance fetch failed:", balanceErr)
                 setCashBalance(0) // Set to 0 instead of leaving as null
             }
 
             // 7. Fetch Profile Logic
-            console.log("👤 Fetching user profile...")
             let profileFound = false
 
             // Try Gamma API (via Proxy)
@@ -145,35 +127,28 @@ const UserPortfolio = () => {
                 // UPDATE: Use query param 'address' instead of path param
                 const profileRes = await fetch(`http://localhost:3001/gamma-api/public-profile?address=${userAddress}`)
 
-                console.log("Gamma API Status:", profileRes.status)
 
                 if (profileRes.ok) {
                     const profile = await profileRes.json()
-                    console.log("Gamma API Response:", profile) // Log full response
 
                     if (profile.name || profile.displayUsernamePublic) {
                         const displayName = profile.name || profile.displayUsernamePublic
                         setUsername(displayName)
-                        console.log("✅ Profile name found via Proxy:", displayName)
                         profileFound = true
                     }
 
                     if (profile.profileImage || profile.profile_picture || profile.optimized_profile_picture) {
                         const img = profile.profileImage || profile.optimized_profile_picture || profile.profile_picture
                         setProfileImage(img)
-                        console.log("✅ Profile image found via Proxy:", img)
                     }
                 } else {
-                    console.warn("Proxy returned non-OK status:", profileRes.status)
                 }
             } catch (err) {
-                console.warn("⚠️ Gamma Proxy fetch failed (Proxy might be down), trying fallback...", err.message)
             }
 
             // Fallback to Activity API if Gamma profile yielded no name (or failed)
             // This is expected for many users who haven't set up a public profile or if proxy is down
             if (!profileFound) {
-                console.log("ℹ️ Trying Activity API fallback...")
                 try {
                     const activityRes = await fetch(`https://data-api.polymarket.com/activity?user=${userAddress}&limit=1`)
 
@@ -187,30 +162,24 @@ const UserPortfolio = () => {
                             // Only set if we didn't find them already (though !profileFound implies we didn't get name)
                             if (name && !username) {
                                 setUsername(name)
-                                console.log("✅ Profile name found via Activity API:", name)
                             }
                             if (img && !profileImage) {
                                 setProfileImage(img)
-                                console.log("✅ Profile image found via Activity API:", img)
                             }
                         }
                     }
                 } catch (err) {
-                    console.warn("⚠️ Activity API fallback failed:", err)
                 }
             }
 
             // 8. Fetch Open Positions
-            console.log("📊 Fetching open positions...")
             const openPositions = await fetchPositions(userAddress)
 
             // 9. Fetch Closed Positions
-            console.log("📊 Fetching closed positions...")
             try {
                 const closedRes = await fetch(`https://data-api.polymarket.com/v1/closed-positions?user=${userAddress}&limit=50`)
                 if (closedRes.ok) {
                     const closedData = await closedRes.json()
-                    console.log("📊 Closed positions fetched:", closedData.length, "positions")
 
                     // Add 'closed: true' flag to closed positions
                     const processedClosed = closedData.map(p => ({ ...p, closed: true }))
@@ -224,11 +193,9 @@ const UserPortfolio = () => {
                     })
                 }
             } catch (err) {
-                console.warn("⚠️ Closed positions fetch failed:", err)
             }
 
         } catch (authErr) {
-            console.error("L2 Auth Error:", authErr)
             setError("L2 Authentication failed. You can still view your positions. " + authErr.message)
             setIsL2Authenticated(false)
             setCashBalance(0) // Ensure balance is set even on error
@@ -260,7 +227,6 @@ const UserPortfolio = () => {
             await performL2Login(wallet, userAddress, 'l1', proxyAddressInput)
 
         } catch (err) {
-            console.error(err)
             setError(err.message)
         } finally {
             setLoading(false)
@@ -283,7 +249,6 @@ const UserPortfolio = () => {
                 passphrase
             }
 
-            console.log("Initializing L2 Client with provided API Creds...")
             const l2Client = new ClobClient(
                 "https://clob.polymarket.com",
                 137,
@@ -302,14 +267,12 @@ const UserPortfolio = () => {
                 const rawBalance = balanceData.balance || "0"
                 setCashBalance(parseFloat(rawBalance) / 1000000)
             } catch (l2Err) {
-                console.warn("L2 Balance fetch failed:", l2Err)
             }
 
             // Fetch positions
             fetchPositions(apiAddress)
 
         } catch (e) {
-            console.error(e)
             setError(e.message)
         } finally {
             setLoading(false)
@@ -343,7 +306,6 @@ const UserPortfolio = () => {
             await performL2Login(wallet, userAddress, 'full', proxyAddressInput)
 
         } catch (err) {
-            console.error(err)
             setError(err.message)
         } finally {
             setLoading(false)
@@ -359,7 +321,6 @@ const UserPortfolio = () => {
                 setPositions(active)
             }
         } catch (err) {
-            console.warn("Positions fetch failed:", err)
         }
     }
 

@@ -60,7 +60,6 @@ function App() {
                 }
               } catch (fetchErr) {
                 // Use original price on timeout or network error
-                console.warn(`CLOB price fetch failed for token ${tokenId}:`, fetchErr.message)
                 livePrices.push(originalPrices[i] || '0')
               }
             }
@@ -76,7 +75,6 @@ function App() {
               }]
             }
           } catch (err) {
-            console.error('Error fetching live prices:', err)
             return event
           }
         })
@@ -86,7 +84,6 @@ function App() {
       setLastUpdate(new Date().toLocaleTimeString())
     } catch (err) {
       setError(err.message)
-      console.error('Error fetching markets:', err)
     } finally {
       setLoading(false)
     }

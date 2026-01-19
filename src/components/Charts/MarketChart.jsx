@@ -19,7 +19,6 @@ function MarketChart({ market, onClose }) {
             wsRef.current = ws
 
             ws.onopen = () => {
-                console.log('WebSocket connected')
                 setIsConnected(true)
 
                 // Subscribe to market updates
@@ -33,7 +32,6 @@ function MarketChart({ market, onClose }) {
             ws.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data)
-                    console.log('WebSocket message:', data)
 
                     // Handle price_change events (has price_changes array)
                     if (data.event_type === 'price_change' && data.price_changes) {
@@ -67,7 +65,6 @@ function MarketChart({ market, onClose }) {
                                 downPrice: newDownPrice
                             }
 
-                            console.log('Adding price update:', newEntry)
 
                             // Keep last 50 data points
                             const updated = [...prev, newEntry].slice(-50)
@@ -95,7 +92,6 @@ function MarketChart({ market, onClose }) {
                                 downPrice: downPrice !== null ? downPrice : lastEntry.downPrice
                             }
 
-                            console.log('Adding price update:', newEntry)
 
                             // Keep last 50 data points
                             const updated = [...prev, newEntry].slice(-50)
@@ -103,17 +99,14 @@ function MarketChart({ market, onClose }) {
                         })
                     }
                 } catch (error) {
-                    console.error('Error parsing WebSocket message:', error)
                 }
             }
 
             ws.onerror = (error) => {
-                console.error('WebSocket error:', error)
                 setIsConnected(false)
             }
 
             ws.onclose = () => {
-                console.log('WebSocket disconnected')
                 setIsConnected(false)
             }
         }

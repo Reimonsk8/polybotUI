@@ -68,7 +68,6 @@ function MiniChart({ market, onClick }) {
                     })
                 }
             } catch (error) {
-                console.error('MiniChart WebSocket error:', error)
             }
         }
 
