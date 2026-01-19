@@ -6,6 +6,7 @@ import LoginForm from './components/Auth/LoginForm'
 import UserHeader from './components/Portfolio/UserHeader'
 import PortfolioStats from './components/Portfolio/PortfolioStats'
 import PositionsTable from './components/Portfolio/PositionsTable'
+import PortfolioTabs from './components/Portfolio/PortfolioTabs'
 
 const UserPortfolio = () => {
     const [address, setAddress] = useState(null)
@@ -404,7 +405,7 @@ const UserPortfolio = () => {
                 positionCount={positions.length}
             />
 
-            <PositionsTable positions={positions} />
+            <PortfolioTabs userAddress={address} client={client} />
         </div>
     )
 }
