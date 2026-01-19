@@ -124,8 +124,8 @@ const UserPortfolio = () => {
 
             // Try Gamma API (via Proxy)
             try {
-                // UPDATE: Use query param 'address' instead of path param
-                const profileRes = await fetch(`http://localhost:3001/gamma-api/public-profile?address=${userAddress}`)
+                // Direct call to Gamma API (works on GitHub Pages)
+                const profileRes = await fetch(`https://gamma-api.polymarket.com/public-profile?address=${userAddress}`)
 
 
                 if (profileRes.ok) {
