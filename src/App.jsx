@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import './App.css'
-import MarketChart from './MarketChart'
-import MiniChart from './MiniChart'
+import MarketChart from './components/Charts/MarketChart'
+import MiniChart from './components/Charts/MiniChart'
 import UserPortfolio from './UserPortfolio'
 
 function App() {
@@ -19,8 +19,9 @@ function App() {
     setError(null)
 
     try {
-      // Use proxy server to avoid CORS issues
+      // Use local proxy server (now running on port 3001)
       const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
+
       const response = await fetch(
         `${API_URL}/api/data?tag_id=102467&limit=100&_t=${Date.now()}`
       )

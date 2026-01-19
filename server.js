@@ -69,7 +69,7 @@ app.get('/api/health', (req, res) => {
 });
 
 // Proxy for Gamma API (User Profiles, etc.) - Fixes missing username/picture in prod
-app.get('/gamma-api/*', async (req, res) => {
+app.all('/gamma-api/*', async (req, res) => {
     try {
         const targetPath = req.url.replace(/^\/gamma-api/, '');
         const targetUrl = `https://gamma-api.polymarket.com${targetPath}`;
@@ -77,6 +77,7 @@ app.get('/gamma-api/*', async (req, res) => {
         console.log(`[Proxy] Proxying ${req.method} ${req.url} -> ${targetUrl}`);
 
         const response = await fetch(targetUrl, {
+            method: req.method,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'application/json',
