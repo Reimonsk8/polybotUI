@@ -34,18 +34,17 @@ const UserPortfolio = () => {
 
                 // Check if session is still valid (not expired)
                 if (session.expiresAt && now < session.expiresAt) {
-                    // Restore session data
+                    // Restore session data directly
                     setAddress(session.address)
                     setUsername(session.username)
                     setProfileImage(session.profileImage)
                     setCashBalance(session.cashBalance)
                     setLoginMethod(session.loginMethod)
                     setIsL2Authenticated(session.isL2Authenticated)
+                    setPositions(session.positions || [])
 
-                    // Re-authenticate with saved private key if available
-                    if (session.privateKey) {
-                        connectPrivateKey(session.privateKey, session.proxyAddress)
-                    }
+                    // Note: Client will need to be re-initialized on first action
+                    // This is acceptable as we're just restoring the UI state
                 } else {
                     // Session expired, clear it
                     localStorage.removeItem(SESSION_KEY)
@@ -111,6 +110,21 @@ const UserPortfolio = () => {
         }
         localStorage.setItem(SESSION_KEY, JSON.stringify(session))
     }
+
+    // Auto-save session whenever important state changes
+    useEffect(() => {
+        if (address && loginMethod) {
+            saveSession({
+                address,
+                username,
+                profileImage,
+                cashBalance,
+                loginMethod,
+                isL2Authenticated,
+                positions
+            })
+        }
+    }, [address, username, profileImage, cashBalance, loginMethod, isL2Authenticated, positions])
 
     // Authenticate L2 & Fetch Private Data
     const performL2Login = async (signer, userAddress, authType, proxyAddressOverride = null) => {
