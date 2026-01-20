@@ -161,35 +161,83 @@ const PortfolioTabs = ({ userAddress, client }) => {
         }
     }
 
-    // Fetch Activity Log using Data API (Proxy) ensures rich metadata
+    // Fetch Activity Log using Client (Trades) then enrich
     const fetchActivityLog = async () => {
         try {
-            const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
-            const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
-
-            // Explicitly use the data-api proxy route
-            const activityUrl = useProxy
-                ? `${proxyUrl}/api/data-api/activity?user=${userAddress}&limit=50&sortBy=TIMESTAMP&sortDirection=DESC`
-                : `https://data-api.polymarket.com/activity?user=${userAddress}&limit=50&sortBy=TIMESTAMP&sortDirection=DESC`
-
-            const response = await fetch(activityUrl)
-
-            const contentType = response.headers.get("content-type");
-            if (response.ok && contentType && contentType.indexOf("application/json") !== -1) {
-                const data = await response.json()
-                setActivityLog(data)
+            // 1. Fetch raw trades from CLOB client (Reliable source)
+            let trades = []
+            if (client) {
+                trades = await client.getTrades({ limit: 50 })
             } else {
-                console.warn("Activity log fetch failed or returned non-JSON:", response.status, await response.text());
-                // Don't set empty here to keep previous data if refresh fails, or set error state
+                // If no client (e.g. view only mode not fully supported for private trades yet without auth), return
+                return
             }
+
+            if (!trades || trades.length === 0) {
+                setActivityLog([])
+                return
+            }
+
+            // 2. Extracts unique market IDs to fetch metadata
+            const uniqueMarketIds = [...new Set(trades.map(t => t.market))]
+            const metadataMap = new Map()
+
+            // 3. Enrich with metadata (Sequential to be safe with rate limits, or Promise.all if proxy handles it)
+            // Using a simple batch-like approach or just Promise.all since it's limited to recent 50 trades (likely few unique markets)
+            await Promise.all(uniqueMarketIds.map(async (conditionId) => {
+                try {
+                    const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
+                    const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
+                    const marketUrl = useProxy
+                        ? `${proxyUrl}/api/gamma-api/markets?condition_id=${conditionId}`
+                        : `https://gamma-api.polymarket.com/markets?condition_id=${conditionId}`
+
+                    const res = await fetch(marketUrl)
+                    if (res.ok) {
+                        const json = await res.json()
+                        const marketData = Array.isArray(json) ? json[0] : json
+                        if (marketData) {
+                            metadataMap.set(conditionId, marketData)
+                        }
+                    }
+                } catch (e) {
+                    console.warn("Failed to fetch metadata for", conditionId)
+                }
+            }))
+
+            // 4. Map trades to activity log format
+            const mappedActivity = trades.map(trade => {
+                const marketData = metadataMap.get(trade.market)
+                return {
+                    ...trade,
+                    type: 'TRADE', // Client returns trades
+                    timestamp: trade.match_time || trade.timestamp, // Handle formatting
+                    market: {
+                        image: marketData?.icon || marketData?.image,
+                        question: marketData?.question || trade.outcome || 'Unknown'
+                    },
+                    title: marketData?.question,
+                    outcome: trade.outcome,
+                    // Ensure numeric values
+                    size: parseFloat(trade.size),
+                    price: parseFloat(trade.price)
+                }
+            })
+
+            setActivityLog(mappedActivity)
+
         } catch (err) {
             console.error("Failed to fetch activity log", err)
+            // Don't clear log on error to prevent flashing
         }
     }
 
     const timeAgo = (timestamp) => {
         if (!timestamp) return ''
-        const seconds = Math.floor((new Date() - new Date(timestamp)) / 1000)
+        // Handle both unix timestamp (seconds) and ISO strings if client returns that
+        const date = typeof timestamp === 'number' ? new Date(timestamp * 1000) : new Date(timestamp)
+        const seconds = Math.floor((new Date() - date) / 1000)
+
         let interval = seconds / 31536000
         if (interval > 1) return Math.floor(interval) + " years ago"
         interval = seconds / 2592000
