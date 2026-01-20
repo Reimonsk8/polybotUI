@@ -70,21 +70,28 @@ const PortfolioTabs = ({ userAddress, client }) => {
                         const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
 
                         const marketUrl = useProxy
-                            ? `${proxyUrl}/gamma-api/markets/${position.conditionId}`
-                            : `https://gamma-api.polymarket.com/markets/${position.conditionId}`
+                            ? `${proxyUrl}/gamma-api/markets?condition_id=${position.conditionId}`
+                            : `https://gamma-api.polymarket.com/markets?condition_id=${position.conditionId}`
 
                         const marketRes = await fetch(marketUrl)
                         if (marketRes.ok) {
-                            const marketData = await marketRes.json()
-                            return {
-                                ...position,
-                                marketData,
-                                icon: marketData.icon,
-                                description: marketData.description,
-                                category: marketData.category,
-                                endDate: marketData.endDate,
-                                volume: marketData.volume,
-                                title: marketData.question || position.title
+                            const marketDataList = await marketRes.json()
+                            // The API returns an array for query lookups
+                            const marketData = Array.isArray(marketDataList) ? marketDataList[0] : marketDataList
+
+                            if (marketData) {
+                                return {
+                                    ...position,
+                                    marketData,
+                                    title: marketData.question || position.title,
+                                    image: marketData.icon || marketData.image,
+                                    icon: marketData.icon || marketData.image,
+                                    slug: marketData.slug,
+                                    description: marketData.description,
+                                    category: marketData.category,
+                                    endDate: marketData.endDate,
+                                    volume: marketData.volume
+                                }
                             }
                         }
                     } catch (err) {
@@ -189,7 +196,7 @@ const PortfolioTabs = ({ userAddress, client }) => {
         }
 
         fetchData()
-    }, [activeTab, userAddress])
+    }, [activeTab, userAddress, client])
 
     // Auto-refresh effect
     useEffect(() => {
