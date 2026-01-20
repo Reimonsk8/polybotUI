@@ -62,44 +62,47 @@ const PortfolioTabs = ({ userAddress, client }) => {
                     title: p.outcome || 'Unknown Market'
                 }))
 
-            // Enrich with Gamma API market metadata
-            const enrichedPositions = await Promise.all(
-                activePositions.map(async (position) => {
-                    try {
-                        const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
-                        const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
+            // Enrich with Gamma API market metadata (Sequential to avoid 429s)
+            const enrichedPositions = []
+            for (const position of activePositions) {
+                try {
+                    const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
+                    const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
 
-                        const marketUrl = useProxy
-                            ? `${proxyUrl}/gamma-api/markets?condition_id=${position.conditionId}`
-                            : `https://gamma-api.polymarket.com/markets?condition_id=${position.conditionId}`
+                    const marketUrl = useProxy
+                        ? `${proxyUrl}/gamma-api/markets?condition_id=${position.conditionId}`
+                        : `https://gamma-api.polymarket.com/markets?condition_id=${position.conditionId}`
 
-                        const marketRes = await fetch(marketUrl)
-                        if (marketRes.ok) {
-                            const marketDataList = await marketRes.json()
-                            // The API returns an array for query lookups
-                            const marketData = Array.isArray(marketDataList) ? marketDataList[0] : marketDataList
+                    const marketRes = await fetch(marketUrl)
+                    if (marketRes.ok) {
+                        const marketDataList = await marketRes.json()
+                        const marketData = Array.isArray(marketDataList) ? marketDataList[0] : marketDataList
 
-                            if (marketData) {
-                                return {
-                                    ...position,
-                                    marketData,
-                                    title: marketData.question || position.title,
-                                    image: marketData.icon || marketData.image,
-                                    icon: marketData.icon || marketData.image,
-                                    slug: marketData.slug,
-                                    description: marketData.description,
-                                    category: marketData.category,
-                                    endDate: marketData.endDate,
-                                    volume: marketData.volume
-                                }
-                            }
+                        if (marketData) {
+                            enrichedPositions.push({
+                                ...position,
+                                marketData,
+                                title: marketData.question || position.title,
+                                image: marketData.icon || marketData.image,
+                                icon: marketData.icon || marketData.image,
+                                slug: marketData.slug,
+                                description: marketData.description,
+                                category: marketData.category,
+                                endDate: marketData.endDate,
+                                volume: marketData.volume
+                            })
+                            continue
                         }
-                    } catch (err) {
-                        // Silently fail for individual market data
                     }
-                    return position
-                })
-            )
+                } catch (err) {
+                    console.warn(`Failed to fetch metadata for ${position.conditionId}`, err)
+                }
+                // Fallback if fetch failed
+                enrichedPositions.push(position)
+
+                // Small delay to be nice to the API
+                await new Promise(resolve => setTimeout(resolve, 100))
+            }
 
             setActiveBets(enrichedPositions)
         } catch (err) {
