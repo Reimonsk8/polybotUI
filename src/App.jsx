@@ -98,10 +98,7 @@ function App() {
     return { shares, profit }
   }
 
-  // Fetch on mount
-  useEffect(() => {
-    fetchMarkets()
-  }, [])
+
 
   // Auto-refresh effect
   useEffect(() => {
@@ -121,53 +118,59 @@ function App() {
       <div className="container">
         <UserPortfolio />
 
-        <div className="controls">
-          <div className="auto-refresh-controls">
-            <label className="toggle-label">
-              <input
-                type="checkbox"
-                checked={autoRefresh}
-                onChange={(e) => setAutoRefresh(e.target.checked)}
-                className="toggle-checkbox"
-              />
-              <span className="toggle-text">
-                🔄 Auto-refresh every {refreshInterval}s
-              </span>
-            </label>
+        {markets.length > 0 && (
+          <div className="controls">
+            <div className="auto-refresh-controls">
+              <label className="toggle-label">
+                <input
+                  type="checkbox"
+                  checked={autoRefresh}
+                  onChange={(e) => setAutoRefresh(e.target.checked)}
+                  className="toggle-checkbox"
+                />
+                <span className="toggle-text">
+                  🔄 Auto-refresh every {refreshInterval}s
+                </span>
+              </label>
 
-            {autoRefresh && (
-              <select
-                value={refreshInterval}
-                onChange={(e) => setRefreshInterval(Number(e.target.value))}
-                className="interval-select"
-              >
-                <option value={10}>10 seconds</option>
-                <option value={30}>30 seconds</option>
-                <option value={60}>1 minute</option>
-              </select>
+              {autoRefresh && (
+                <select
+                  value={refreshInterval}
+                  onChange={(e) => setRefreshInterval(Number(e.target.value))}
+                  className="interval-select"
+                >
+                  <option value={10}>10 seconds</option>
+                  <option value={30}>30 seconds</option>
+                  <option value={60}>1 minute</option>
+                </select>
+              )}
+            </div>
+
+            {lastUpdate && (
+              <p className="last-update">
+                Last updated: <strong>{lastUpdate}</strong>
+                {autoRefresh && <span className="live-indicator"> 🟢 LIVE</span>}
+              </p>
             )}
           </div>
-
-          {lastUpdate && (
-            <p className="last-update">
-              Last updated: <strong>{lastUpdate}</strong>
-              {autoRefresh && <span className="live-indicator"> 🟢 LIVE</span>}
-            </p>
-          )}
-        </div>
+        )}
 
         {error && (
           <div className="error-card">
             <span className="error-icon">⚠️</span>
             <p>Error: {error}</p>
+            <button className="retry-btn" onClick={fetchMarkets}>Retry Connection</button>
           </div>
         )}
 
         {markets.length === 0 && !loading && !error && (
           <div className="empty-state">
             <div className="empty-icon">📊</div>
-            <h3>No Markets Loaded</h3>
-            <p>Waiting for data...</p>
+            <h3>Load Market Data</h3>
+            <p>Click below to fetch the latest Bitcoin markets from Polymarket.</p>
+            <button className="load-markets-btn" onClick={fetchMarkets}>
+              🚀 Load Markets
+            </button>
           </div>
         )}
 
