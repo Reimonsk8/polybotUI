@@ -173,9 +173,14 @@ const PortfolioTabs = ({ userAddress, client }) => {
                 : `https://data-api.polymarket.com/activity?user=${userAddress}&limit=50&sortBy=TIMESTAMP&sortDirection=DESC`
 
             const response = await fetch(activityUrl)
-            if (response.ok) {
+
+            const contentType = response.headers.get("content-type");
+            if (response.ok && contentType && contentType.indexOf("application/json") !== -1) {
                 const data = await response.json()
                 setActivityLog(data)
+            } else {
+                console.warn("Activity log fetch failed or returned non-JSON:", response.status, await response.text());
+                // Don't set empty here to keep previous data if refresh fails, or set error state
             }
         } catch (err) {
             console.error("Failed to fetch activity log", err)
