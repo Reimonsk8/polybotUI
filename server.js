@@ -29,6 +29,12 @@ app.get('/', (req, res) => {
     });
 });
 
+// Middleware to log all requests
+app.use((req, res, next) => {
+    console.log(`[Incoming] ${req.method} ${req.url}`);
+    next();
+});
+
 // Proxy endpoint for Polymarket API
 app.get('/api/data', async (req, res) => {
     try {
@@ -68,13 +74,11 @@ app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', message: 'Polymarket proxy server is running' });
 });
 
-// Proxy for Gamma API (User Profiles, etc.) - Fixes missing username/picture in prod
-app.all('/gamma-api/*', async (req, res) => {
+// Proxy for Gamma API (User Profiles, etc.)
+app.use('/gamma-api', async (req, res) => {
     try {
-        const targetPath = req.url.replace(/^\/gamma-api/, '');
-        const targetUrl = `https://gamma-api.polymarket.com${targetPath}`;
-
-        console.log(`[Proxy] Proxying ${req.method} ${req.url} -> ${targetUrl}`);
+        const targetUrl = `https://gamma-api.polymarket.com${req.url}`;
+        console.log(`[Proxy] Gamma: ${req.method} ${req.url} -> ${targetUrl}`);
 
         const response = await fetch(targetUrl, {
             method: req.method,
@@ -87,11 +91,9 @@ app.all('/gamma-api/*', async (req, res) => {
             }
         });
 
-        console.log(`[Proxy] Upstream status for ${targetPath}: ${response.status}`);
-
         if (!response.ok) {
             const text = await response.text();
-            console.warn(`[Proxy] Upstream error: ${response.status} ${text}`);
+            console.warn(`[Proxy] Gamma upstream error: ${response.status} ${text}`);
             return res.status(response.status).send(text);
         }
 
@@ -104,12 +106,10 @@ app.all('/gamma-api/*', async (req, res) => {
 });
 
 // Proxy for Data API (Activity, etc.)
-app.all('/data-api/*', async (req, res) => {
+app.use('/data-api', async (req, res) => {
     try {
-        const targetPath = req.url.replace(/^\/data-api/, '');
-        const targetUrl = `https://data-api.polymarket.com${targetPath}`;
-
-        console.log(`[Proxy] Proxying ${req.method} ${req.url} -> ${targetUrl}`);
+        const targetUrl = `https://data-api.polymarket.com${req.url}`;
+        console.log(`[Proxy] Data: ${req.method} ${req.url} -> ${targetUrl}`);
 
         const response = await fetch(targetUrl, {
             method: req.method,
@@ -122,11 +122,9 @@ app.all('/data-api/*', async (req, res) => {
             }
         });
 
-        console.log(`[Proxy] Upstream status for ${targetPath}: ${response.status}`);
-
         if (!response.ok) {
             const text = await response.text();
-            console.warn(`[Proxy] Upstream error: ${response.status} ${text}`);
+            console.warn(`[Proxy] Data upstream error: ${response.status} ${text}`);
             return res.status(response.status).send(text);
         }
 
@@ -136,6 +134,12 @@ app.all('/data-api/*', async (req, res) => {
         console.error('Data Proxy error:', error);
         res.status(500).json({ error: error.message });
     }
+});
+
+// Catch-all for debugging 404s
+app.use((req, res) => {
+    console.log(`[404] Route not found: ${req.method} ${req.url}`);
+    res.status(404).json({ error: 'Route not found', path: req.url, method: req.method });
 });
 
 // Start server only in local development (not on Vercel)
