@@ -158,26 +158,44 @@ const PortfolioTabs = ({ userAddress, client }) => {
         }
     }
 
-    // Fetch Activity Log using L2 authenticated client
+    // Fetch Activity Log using Data API (Proxy) ensures rich metadata
     const fetchActivityLog = async () => {
         try {
-            if (!client) {
-                // Fallback to public API if no client
-                const response = await fetch(`https://data-api.polymarket.com/activity?user=${userAddress}&limit=50&sortBy=TIMESTAMP&sortDirection=DESC`)
-                if (response.ok) {
-                    const data = await response.json()
-                    setActivityLog(data)
-                }
-                return
-            }
+            const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
+            const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
 
-            // Use L2 authenticated method to get trades
-            const trades = await client.getTrades({ limit: 50 })
-            setActivityLog(trades)
+            // Explicitly use the data-api proxy route
+            const activityUrl = useProxy
+                ? `${proxyUrl}/data-api/activity?user=${userAddress}&limit=50&sortBy=TIMESTAMP&sortDirection=DESC`
+                : `https://data-api.polymarket.com/activity?user=${userAddress}&limit=50&sortBy=TIMESTAMP&sortDirection=DESC`
+
+            const response = await fetch(activityUrl)
+            if (response.ok) {
+                const data = await response.json()
+                setActivityLog(data)
+            }
         } catch (err) {
-            // Silently fail
+            console.error("Failed to fetch activity log", err)
         }
     }
+
+    const timeAgo = (timestamp) => {
+        if (!timestamp) return ''
+        const seconds = Math.floor((new Date() - new Date(timestamp)) / 1000)
+        let interval = seconds / 31536000
+        if (interval > 1) return Math.floor(interval) + " years ago"
+        interval = seconds / 2592000
+        if (interval > 1) return Math.floor(interval) + " months ago"
+        interval = seconds / 86400
+        if (interval > 1) return Math.floor(interval) + " days ago"
+        interval = seconds / 3600
+        if (interval > 1) return Math.floor(interval) + " hours ago"
+        interval = seconds / 60
+        if (interval > 1) return Math.floor(interval) + " minutes ago"
+        return Math.floor(seconds) + " seconds ago"
+    }
+
+
 
     // Fetch data based on active tab
     useEffect(() => {
@@ -351,46 +369,79 @@ const PortfolioTabs = ({ userAddress, client }) => {
 
                         {/* Activity Log Tab */}
                         {activeTab === 'activity' && (
-                            <div className="tab-panel">
+                            <div className="tab-panel activity-panel">
                                 {activityLog.length === 0 ? (
                                     <div className="empty-state">No activity found.</div>
                                 ) : (
-                                    <div className="activity-list">
+                                    <div className="activity-table">
+                                        <div className="activity-header-row">
+                                            <span className="col-activity">ACTIVITY</span>
+                                            <span className="col-market">MARKET</span>
+                                            <span className="col-value">VALUE</span>
+                                        </div>
                                         {activityLog.map((activity, idx) => {
-                                            // Handle both Data API format and Trade format from getTrades()
-                                            const isTrade = activity.match_time !== undefined
                                             const side = activity.side || 'TRADE'
                                             const type = activity.type || 'TRADE'
-                                            const amount = activity.size || activity.usdcSize
-                                            const timestamp = activity.match_time || activity.timestamp
-                                            const outcome = activity.outcome || ''
+                                            const amount = activity.size || activity.usdcSize || activity.shares
+                                            const timestamp = activity.timestamp || activity.match_time
+                                            const price = activity.price || 0
+                                            const valueChange = (amount * price).toFixed(2)
+
+                                            // Determine icon and color
+                                            let icon = '📝'
+                                            let actionText = type
+                                            let actionClass = 'neutral'
+
+                                            if (side === 'BUY') {
+                                                icon = '➕'
+                                                actionText = 'Bought'
+                                                actionClass = 'bought'
+                                            } else if (side === 'SELL') {
+                                                icon = '➖'
+                                                actionText = 'Sold'
+                                                actionClass = 'sold'
+                                            }
+                                            if (type === 'REDEEM') {
+                                                icon = '💰'
+                                                actionText = 'Redeemed'
+                                                actionClass = 'redeem'
+                                            }
 
                                             return (
-                                                <div key={activity.id || idx} className="activity-item">
-                                                    <div className="activity-icon">
-                                                        {side === 'BUY' && '📈'}
-                                                        {side === 'SELL' && '📉'}
-                                                        {type === 'REDEEM' && '💰'}
-                                                        {type === 'REWARD' && '🎁'}
+                                                <div key={activity.id || idx} className="activity-row">
+                                                    <div className="col-activity">
+                                                        <div className={`activity-icon-badge ${actionClass}`}>
+                                                            {icon}
+                                                        </div>
+                                                        <span className="activity-action-text">{actionText}</span>
                                                     </div>
-                                                    <div className="activity-details">
-                                                        <div className="activity-title">
-                                                            <span className="activity-type">{type}</span>
-                                                            {side && <span className={`activity-side ${side.toLowerCase()}`}>{side}</span>}
+
+                                                    <div className="col-market">
+                                                        {activity.market?.image && (
+                                                            <img
+                                                                src={activity.market.image}
+                                                                alt=""
+                                                                className="market-icon-small"
+                                                                onError={(e) => e.target.style.display = 'none'}
+                                                            />
+                                                        )}
+                                                        <div className="market-details">
+                                                            <div className="market-question">{activity.market?.question || activity.title || 'Unknown Market'}</div>
+                                                            <div className="outcome-details">
+                                                                <span className={`outcome-text ${activity.outcome?.toLowerCase()}`}>
+                                                                    {activity.outcome} {price > 0 && `${(price * 100).toFixed(0)}¢`}
+                                                                </span>
+                                                                <span className="separator">|</span>
+                                                                <span className="share-count">{parseFloat(amount || 0).toFixed(1)} shares</span>
+                                                            </div>
                                                         </div>
-                                                        <div className="activity-market">{activity.title || outcome}</div>
-                                                        <div className="activity-outcome">{outcome}</div>
                                                     </div>
-                                                    <div className="activity-meta">
-                                                        <div className="activity-amount">
-                                                            {amount && `${parseFloat(amount).toFixed(2)} shares @ ${formatCurrency(activity.price || 0)}`}
+
+                                                    <div className="col-value">
+                                                        <div className={`value-text ${side === 'BUY' ? 'negative' : 'positive'}`}>
+                                                            {side === 'BUY' ? '-' : '+'}${formatCurrency(valueChange).replace('$', '')}
                                                         </div>
-                                                        <div className="activity-time">
-                                                            {timestamp && (isTrade
-                                                                ? new Date(timestamp).toLocaleString()
-                                                                : formatDate(timestamp)
-                                                            )}
-                                                        </div>
+                                                        <div className="time-ago">{timeAgo(timestamp)}</div>
                                                     </div>
                                                 </div>
                                             )
