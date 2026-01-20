@@ -70,7 +70,7 @@ const PortfolioTabs = ({ userAddress, client }) => {
                     const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
 
                     const marketUrl = useProxy
-                        ? `${proxyUrl}/gamma-api/markets?condition_id=${position.conditionId}`
+                        ? `${proxyUrl}/api/gamma-api/markets?condition_id=${position.conditionId}`
                         : `https://gamma-api.polymarket.com/markets?condition_id=${position.conditionId}`
 
                     const marketRes = await fetch(marketUrl)
@@ -169,7 +169,7 @@ const PortfolioTabs = ({ userAddress, client }) => {
 
             // Explicitly use the data-api proxy route
             const activityUrl = useProxy
-                ? `${proxyUrl}/data-api/activity?user=${userAddress}&limit=50&sortBy=TIMESTAMP&sortDirection=DESC`
+                ? `${proxyUrl}/api/data-api/activity?user=${userAddress}&limit=50&sortBy=TIMESTAMP&sortDirection=DESC`
                 : `https://data-api.polymarket.com/activity?user=${userAddress}&limit=50&sortBy=TIMESTAMP&sortDirection=DESC`
 
             const response = await fetch(activityUrl)

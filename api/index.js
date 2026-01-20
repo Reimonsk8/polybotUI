@@ -75,10 +75,19 @@ app.get('/api/health', (req, res) => {
 });
 
 // Proxy for Gamma API (User Profiles, etc.)
-app.use('/gamma-api', async (req, res) => {
+app.use(['/gamma-api', '/api/gamma-api'], async (req, res) => {
     try {
+        // Strip the prefix to get the target path
+        const prefix = req.originalUrl.startsWith('/api') ? '/api/gamma-api' : '/gamma-api';
+        const targetPath = req.url; // req.url is already stripped of the mount path by app.use!
+
+        // However, we need to be careful. app.use leaves the rest. 
+        // If request is /api/gamma-api/foo, req.url is /foo.
+        // If request is /gamma-api/foo, req.url is /foo.
+        // So we can just append req.url to the target base.
+
         const targetUrl = `https://gamma-api.polymarket.com${req.url}`;
-        console.log(`[Proxy] Gamma: ${req.method} ${req.url} -> ${targetUrl}`);
+        console.log(`[Proxy] Gamma: ${req.method} ${req.originalUrl} -> ${targetUrl}`);
 
         const response = await fetch(targetUrl, {
             method: req.method,
@@ -106,10 +115,10 @@ app.use('/gamma-api', async (req, res) => {
 });
 
 // Proxy for Data API (Activity, etc.)
-app.use('/data-api', async (req, res) => {
+app.use(['/data-api', '/api/data-api'], async (req, res) => {
     try {
         const targetUrl = `https://data-api.polymarket.com${req.url}`;
-        console.log(`[Proxy] Data: ${req.method} ${req.url} -> ${targetUrl}`);
+        console.log(`[Proxy] Data: ${req.method} ${req.originalUrl} -> ${targetUrl}`);
 
         const response = await fetch(targetUrl, {
             method: req.method,
