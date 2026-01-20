@@ -374,6 +374,33 @@
     }
 }
 
+/* Fetch Prompt */
+.fetch-prompt-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 3rem;
+    min-height: 200px;
+}
+
+.fetch-data-btn {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    padding: 12px 24px;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    box-shadow: 0 4px 12px rgba(118, 75, 162, 0.3);
+}
+
+.fetch-data-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(118, 75, 162, 0.5);
+}
+
 /* New Activity Table Layout */
 .activity-table {
     display: flex;
@@ -420,7 +447,8 @@
 .col-market {
     flex: 1;
     display: flex;
-    align-items: flex-start; /* Align icon with first line of text */
+    align-items: flex-start;
+    /* Align icon with first line of text */
     gap: 0.75rem;
     padding-right: 1rem;
 }
@@ -512,8 +540,15 @@
     font-weight: 600;
 }
 
-.outcome-text.yes, .outcome-text.long { color: #2ecc71; }
-.outcome-text.no, .outcome-text.short { color: #e74c3c; }
+.outcome-text.yes,
+.outcome-text.long {
+    color: #2ecc71;
+}
+
+.outcome-text.no,
+.outcome-text.short {
+    color: #e74c3c;
+}
 
 .separator {
     color: #444;
@@ -529,8 +564,13 @@
     font-size: 0.95rem;
 }
 
-.value-text.positive { color: #2ecc71; }
-.value-text.negative { color: #fff; }
+.value-text.positive {
+    color: #2ecc71;
+}
+
+.value-text.negative {
+    color: #fff;
+}
 
 .time-ago {
     font-size: 0.75rem;
@@ -541,20 +581,23 @@
 /* Responsive adjustments */
 @media (max-width: 768px) {
     .activity-header-row {
-        display: none; /* Hide headers on mobile */
+        display: none;
+        /* Hide headers on mobile */
     }
-    
+
     .activity-row {
         flex-direction: column;
         align-items: flex-start;
         gap: 1rem;
     }
-    
-    .col-activity, .col-market, .col-value {
+
+    .col-activity,
+    .col-market,
+    .col-value {
         width: 100%;
         align-items: flex-start;
     }
-    
+
     .col-value {
         flex-direction: row;
         justify-content: space-between;

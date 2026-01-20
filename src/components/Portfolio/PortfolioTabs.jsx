@@ -205,24 +205,29 @@ const PortfolioTabs = ({ userAddress, client }) => {
 
 
 
-    // Fetch data based on active tab
-    useEffect(() => {
+    const [hasFetched, setHasFetched] = useState(false)
+
+    const handleFetchData = async () => {
         if (!userAddress) return
-
         setLoading(true)
-        const fetchData = async () => {
-            if (activeTab === 'active') {
-                await fetchActiveBets()
-            } else if (activeTab === 'closed') {
-                await fetchClosedPositions()
-            } else if (activeTab === 'activity') {
-                await fetchActivityLog()
-            }
-            setLoading(false)
+        if (activeTab === 'active') {
+            await fetchActiveBets()
+        } else if (activeTab === 'closed') {
+            await fetchClosedPositions()
+        } else if (activeTab === 'activity') {
+            await fetchActivityLog()
         }
+        setLoading(false)
+        setHasFetched(true)
+    }
 
-        fetchData()
-    }, [activeTab, userAddress, client])
+    // Reset fetch state on tab change, but don't auto-fetch
+    useEffect(() => {
+        setHasFetched(false)
+        setActiveBets([])
+        setClosedPositions([])
+        setActivityLog([])
+    }, [activeTab])
 
     // Auto-refresh effect
     useEffect(() => {
@@ -271,7 +276,13 @@ const PortfolioTabs = ({ userAddress, client }) => {
 
             {/* Tab Content */}
             <div className="tab-content">
-                {loading ? (
+                {!hasFetched && !loading ? (
+                    <div className="fetch-prompt-container">
+                        <button className="fetch-data-btn" onClick={handleFetchData}>
+                            Load {activeTab === 'active' ? 'Active Bets' : activeTab === 'closed' ? 'Closed Positions' : 'Activity Log'}
+                        </button>
+                    </div>
+                ) : loading ? (
                     <div className="loading-state">Loading...</div>
                 ) : (
                     <>
