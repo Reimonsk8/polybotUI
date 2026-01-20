@@ -66,7 +66,14 @@ const PortfolioTabs = ({ userAddress, client }) => {
             const enrichedPositions = await Promise.all(
                 activePositions.map(async (position) => {
                     try {
-                        const marketRes = await fetch(`https://gamma-api.polymarket.com/markets/${position.conditionId}`)
+                        const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
+                        const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
+
+                        const marketUrl = useProxy
+                            ? `${proxyUrl}/gamma-api/markets/${position.conditionId}`
+                            : `https://gamma-api.polymarket.com/markets/${position.conditionId}`
+
+                        const marketRes = await fetch(marketUrl)
                         if (marketRes.ok) {
                             const marketData = await marketRes.json()
                             return {
