@@ -229,18 +229,22 @@ const PortfolioTabs = ({ userAddress, client }) => {
         setActivityLog([])
     }, [activeTab])
 
-    // Auto-refresh effect
+    // Auto-refresh effect - Only runs if manual fetch has happened
     useEffect(() => {
-        if (!autoRefresh || !userAddress) return
+        if (!autoRefresh || !userAddress || !hasFetched) return
 
         const interval = setInterval(() => {
+            // Use handleFetchData to keep state consistent, but manage loading state carefully if needed
+            // For background refresh, we might not want to show full loading spinner, 
+            // but for simplicity reusing the fetchers is fine as they handle state updates.
             if (activeTab === 'active') fetchActiveBets()
             else if (activeTab === 'closed') fetchClosedPositions()
             else if (activeTab === 'activity') fetchActivityLog()
+            // Note: We don't call setHasFetched(true) here as it's already true
         }, 30000) // 30 seconds
 
         return () => clearInterval(interval)
-    }, [autoRefresh, activeTab, userAddress])
+    }, [autoRefresh, activeTab, userAddress, hasFetched])
 
     const formatDate = (timestamp) => {
         return new Date(timestamp * 1000).toLocaleString()
@@ -473,17 +477,20 @@ const PortfolioTabs = ({ userAddress, client }) => {
                 )}
 
                 {/* Auto-refresh Toggle */}
-                <div className="auto-refresh-toggle">
-                    <label>
-                        <input
-                            type="checkbox"
-                            checked={autoRefresh}
-                            onChange={(e) => setAutoRefresh(e.target.checked)}
-                        />
-                        <span className="refresh-icon">🔄</span>
-                        Auto-refresh every 30s
-                    </label>
-                </div>
+                {/* Auto-refresh Toggle - Only show after initial load */}
+                {hasFetched && (
+                    <div className="auto-refresh-toggle">
+                        <label>
+                            <input
+                                type="checkbox"
+                                checked={autoRefresh}
+                                onChange={(e) => setAutoRefresh(e.target.checked)}
+                            />
+                            <span className="refresh-icon">🔄</span>
+                            Auto-refresh every 30s
+                        </label>
+                    </div>
+                )}
             </div>
         </div >
     )
