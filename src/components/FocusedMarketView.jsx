@@ -196,12 +196,13 @@ const FocusedMarketView = ({ event }) => {
                     if (res.ok) {
                         const data = await res.json()
                         const price = parseFloat(data.price)
+                        // Only add if changed or periodically? Add to history.
                         setCurrentAssetPrice(price)
                         setAssetPriceHistory(h => [...h, {
                             time: new Date().toLocaleTimeString(),
                             timestamp: Date.now(),
                             price: price
-                        }].slice(-50))
+                        }].slice(-60)) // Keep last 60 points
                     }
                 } catch (err) {
                     console.warn('[Asset Price] Binance fallback failed', err)
@@ -230,7 +231,6 @@ const FocusedMarketView = ({ event }) => {
                                 action: "subscribe",
                                 subscriptions: [{ topic: "crypto_prices", type: "update", filters: [assetSymbol] }]
                             }))
-                            // Redundance just in case
                             ws.send(JSON.stringify({
                                 action: "subscribe",
                                 subscriptions: [{ topic: "crypto_prices", type: "update", filters: assetSymbol }]
@@ -244,8 +244,6 @@ const FocusedMarketView = ({ event }) => {
                 }
 
                 ws.onmessage = (e) => {
-                    // If we receive data, ensure fallback is off? 
-                    // No, if we are here, WS is working.
                     try {
                         const raw = JSON.parse(e.data)
                         const messages = Array.isArray(raw) ? raw : [raw]
@@ -257,7 +255,7 @@ const FocusedMarketView = ({ event }) => {
                                     time: new Date(msg.payload.timestamp || Date.now()).toLocaleTimeString(),
                                     timestamp: msg.payload.timestamp,
                                     price: price
-                                }].slice(-50))
+                                }].slice(-60))
                             }
                         })
                     } catch (err) { }
@@ -291,6 +289,39 @@ const FocusedMarketView = ({ event }) => {
 
     }, [assetSymbol])
 
+    // 5. FETCH HISTORICAL ASSET DATA (Binance Kline)
+    useEffect(() => {
+        if (!assetSymbol) return
+
+        const fetchHistory = async () => {
+            try {
+                // Fetch last 60 minutes of data to fill chart
+                const symbol = assetSymbol.toUpperCase()
+                const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1m&limit=60`)
+                if (res.ok) {
+                    const data = await res.json()
+                    // Binance kline format: [ot, open, high, low, close, ...]
+                    const history = data.map(d => ({
+                        time: new Date(d[0]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                        timestamp: d[0],
+                        price: parseFloat(d[4])
+                    }))
+                    setAssetPriceHistory(history)
+
+                    if (history.length > 0) {
+                        setCurrentAssetPrice(history[history.length - 1].price)
+                    }
+                }
+            } catch (err) {
+                console.warn("[Chart] Failed to load history", err)
+            }
+        }
+
+        fetchHistory()
+
+    }, [assetSymbol])
+
+
     if (!market) return <div className="loading">Loading Market Data...</div>
 
     const calculateProfit = (price) => {
@@ -301,24 +332,44 @@ const FocusedMarketView = ({ event }) => {
     // Determine which chart to show
     const showAssetChart = assetSymbol && chartType === 'asset'
 
-    // Y-Domain
+    // Y-Domain with padding
     const yDomain = showAssetChart && targetPrice && currentAssetPrice
         ? [Math.min(currentAssetPrice, targetPrice) * 0.999, Math.max(currentAssetPrice, targetPrice) * 1.001]
         : ['auto', 'auto']
+
+    // Price Stats
+    const priceDiff = (showAssetChart && targetPrice && currentAssetPrice)
+        ? (currentAssetPrice - targetPrice)
+        : null
+
+    const diffColor = priceDiff ? (priceDiff > 0 ? '#10b981' : '#ef4444') : '#94a3b8'
+
+    // Refine tick format for Y-Axis
+    const formatYAxis = (val) => {
+        if (val >= 1000) return `$${(val / 1000).toFixed(1)}k`
+        return `$${val.toFixed(2)}`
+    }
 
     const ChartComponent = showAssetChart ? (
         <ResponsiveContainer width="100%" height="100%" minHeight={450}>
             <LineChart data={assetPriceHistory}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.3} />
-                <XAxis dataKey="time" stroke="#64748b" tick={{ fontSize: 11 }} minTickGap={50} />
+                <XAxis
+                    dataKey="time"
+                    stroke="#64748b"
+                    tick={{ fontSize: 11 }}
+                    minTickGap={60}
+                />
                 <YAxis
                     stroke="#64748b"
                     domain={yDomain}
-                    tickFormatter={v => `$${v.toLocaleString()}`}
-                    width={80}
+                    tickFormatter={formatYAxis}
+                    width={60}
+                    orientation="right"
                 />
                 <Tooltip
                     contentStyle={{ background: '#0f172a', border: '1px solid #334155' }}
+                    itemStyle={{ color: '#f59e0b' }}
                     formatter={v => [`$${parseFloat(v).toLocaleString()}`, 'Price']}
                 />
 
@@ -327,18 +378,22 @@ const FocusedMarketView = ({ event }) => {
                         y={targetPrice}
                         stroke="#94a3b8"
                         strokeDasharray="5 5"
-                        label={{ value: 'Target', position: 'right', fill: '#94a3b8' }}
+                        label={{
+                            value: 'Target',
+                            position: 'left',
+                            fill: '#94a3b8',
+                            fontSize: 12
+                        }}
                     />
                 )}
 
                 <Line
                     type="monotone"
                     dataKey="price"
-                    stroke="#f59e0b" // Gold
+                    stroke="#f59e0b"
                     strokeWidth={3}
                     dot={false}
-                    animationDuration={300}
-                    isAnimationActive={false}
+                    animationDuration={500}
                 />
             </LineChart>
         </ResponsiveContainer>
@@ -347,11 +402,11 @@ const FocusedMarketView = ({ event }) => {
             <LineChart data={priceHistory}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.3} />
                 <XAxis dataKey="time" stroke="#64748b" tick={{ fontSize: 11 }} minTickGap={50} />
-                <YAxis stroke="#64748b" domain={[0, 1]} tickFormatter={v => `${(v * 100).toFixed(0)}%`} />
+                <YAxis stroke="#64748b" domain={[0, 1]} tickFormatter={v => `${(v * 100).toFixed(0)}%`} orientation="right" />
                 <Tooltip contentStyle={{ background: '#0f172a' }} formatter={v => `${(v * 100).toFixed(1)}%`} />
                 <Legend />
-                <Line type="stepAfter" dataKey="upPrice" stroke="#10b981" strokeWidth={3} dot={false} name="UP" isAnimationActive={false} />
-                <Line type="stepAfter" dataKey="downPrice" stroke="#ef4444" strokeWidth={3} dot={false} name="DOWN" isAnimationActive={false} />
+                <Line type="stepAfter" dataKey="upPrice" stroke="#10b981" strokeWidth={3} dot={false} name="UP" animationDuration={500} />
+                <Line type="stepAfter" dataKey="downPrice" stroke="#ef4444" strokeWidth={3} dot={false} name="DOWN" animationDuration={500} />
             </LineChart>
         </ResponsiveContainer>
     )
@@ -381,22 +436,37 @@ const FocusedMarketView = ({ event }) => {
                 </div>
 
                 {/* Stat Headers */}
-
                 {showAssetChart && targetPrice && (
                     <div className="price-stats-header" style={{ display: 'flex', gap: '3rem', alignItems: 'center' }}>
+                        {/* Target */}
                         <div style={{ textAlign: 'right' }}>
-                            <div style={{ color: '#94a3b8', fontSize: '0.85rem', fontWeight: '600', textTransform: 'uppercase' }}>Price to Beat</div>
-                            <div style={{ fontSize: '1.8rem', fontWeight: '700', color: '#e2e8f0', lineHeight: 1 }}>${targetPrice.toLocaleString()}</div>
+                            <div style={{ color: '#94a3b8', fontSize: '0.75rem', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '1px' }}>Price to Beat</div>
+                            <div style={{ fontSize: '1.8rem', fontWeight: '500', color: '#cbd5e1', lineHeight: 1 }}>${targetPrice.toLocaleString()}</div>
                         </div>
+
+                        {/* Current */}
                         {currentAssetPrice && (
                             <div style={{ textAlign: 'right' }}>
-                                <div style={{ color: '#f59e0b', fontSize: '0.85rem', fontWeight: '600', textTransform: 'uppercase' }}>Current Price</div>
+                                <div style={{ color: '#f59e0b', fontSize: '0.75rem', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '1px' }}>Current Price</div>
                                 <div style={{ fontSize: '1.8rem', fontWeight: '700', color: '#f59e0b', lineHeight: 1 }}>${currentAssetPrice.toLocaleString()}</div>
+                            </div>
+                        )}
+
+                        {/* Difference (NEW) */}
+                        {priceDiff !== null && (
+                            <div style={{ textAlign: 'right', background: 'rgba(255,255,255,0.05)', padding: '8px 16px', borderRadius: '8px' }}>
+                                <div style={{ color: diffColor, fontSize: '0.75rem', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                                    {priceDiff >= 0 ? 'ABOVE TARGET' : 'BELOW TARGET'}
+                                </div>
+                                <div style={{ fontSize: '1.8rem', fontWeight: '700', color: diffColor, lineHeight: 1 }}>
+                                    {priceDiff >= 0 ? '+' : '-'}${Math.abs(priceDiff).toFixed(2)}
+                                </div>
                             </div>
                         )}
                     </div>
                 )}
 
+                {/* Fallback for Probs view */}
                 {!showAssetChart && (
                     <div className="price-stats-header" style={{ display: 'flex', gap: '3rem', alignItems: 'center' }}>
                         <div style={{ textAlign: 'right' }}>
@@ -411,8 +481,8 @@ const FocusedMarketView = ({ event }) => {
                 )}
 
                 <div className="live-indicator">
-                    <div className="live-dot" style={{ background: isConnected ? '#10b981' : '#64748b', animation: isConnected ? 'pulse 2s infinite' : 'none' }}></div>
-                    {isConnected ? 'LIVE' : '...'}
+                    <div className="live-dot" style={{ background: isConnected || isAssetConnected ? '#10b981' : '#64748b', animation: (isConnected || isAssetConnected) ? 'pulse 2s infinite' : 'none' }}></div>
+                    {(isConnected || isAssetConnected) ? 'LIVE' : '...'}
                 </div>
             </div>
 
@@ -422,7 +492,9 @@ const FocusedMarketView = ({ event }) => {
                 border: '1px solid #1e293b',
                 position: 'relative',
                 width: '100%',
-                height: '500px'
+                height: '500px',
+                borderRadius: '12px',
+                overflow: 'hidden'
             }}>
                 {ChartComponent}
 
@@ -448,7 +520,9 @@ const FocusedMarketView = ({ event }) => {
                                 cursor: 'pointer',
                                 display: 'flex',
                                 alignItems: 'center',
-                                gap: '6px'
+                                gap: '6px',
+                                fontSize: '0.85rem',
+                                fontWeight: '500'
                             }}
                         >
                             <span>📈</span> Probs
@@ -465,7 +539,9 @@ const FocusedMarketView = ({ event }) => {
                                 cursor: 'pointer',
                                 display: 'flex',
                                 alignItems: 'center',
-                                gap: '6px'
+                                gap: '6px',
+                                fontSize: '0.85rem',
+                                fontWeight: '500'
                             }}
                         >
                             <span>₿</span> Price
