@@ -183,30 +183,32 @@ const PortfolioTabs = ({ userAddress, client }) => {
         setHasFetched(true)
     }
 
-    // Reset fetch state on tab change, but don't auto-fetch
+    // Reset and Fetch on tab change or address change
     useEffect(() => {
-        setHasFetched(false)
+        // Reset data when tab changes to avoid flashing old data for a split second
         setActiveBets([])
         setClosedPositions([])
         setActivityLog([])
-    }, [activeTab])
 
-    // Auto-refresh effect - Only runs if manual fetch has happened
+        // Auto-fetch data
+        if (userAddress) {
+            handleFetchData()
+        }
+    }, [activeTab, userAddress])
+
+    // Auto-refresh effect
     useEffect(() => {
-        if (!autoRefresh || !userAddress || !hasFetched) return
+        if (!autoRefresh || !userAddress) return
 
         const interval = setInterval(() => {
-            // Use handleFetchData to keep state consistent, but manage loading state carefully if needed
-            // For background refresh, we might not want to show full loading spinner, 
-            // but for simplicity reusing the fetchers is fine as they handle state updates.
+            // Background refresh
             if (activeTab === 'active') fetchActiveBets()
             else if (activeTab === 'closed') fetchClosedPositions()
             else if (activeTab === 'activity') fetchActivityLog()
-            // Note: We don't call setHasFetched(true) here as it's already true
-        }, 30000) // 30 seconds
+        }, 30000)
 
         return () => clearInterval(interval)
-    }, [autoRefresh, activeTab, userAddress, hasFetched])
+    }, [autoRefresh, activeTab, userAddress])
 
     const formatDate = (timestamp) => {
         return new Date(timestamp * 1000).toLocaleString()
@@ -242,13 +244,7 @@ const PortfolioTabs = ({ userAddress, client }) => {
 
             {/* Tab Content */}
             <div className="tab-content">
-                {!hasFetched && !loading ? (
-                    <div className="fetch-prompt-container">
-                        <button className="fetch-data-btn" onClick={handleFetchData}>
-                            Load {activeTab === 'active' ? 'Active Bets' : activeTab === 'closed' ? 'Closed Positions' : 'Activity Log'}
-                        </button>
-                    </div>
-                ) : loading ? (
+                {loading ? (
                     <div className="loading-state">Loading...</div>
                 ) : (
                     <>
@@ -439,22 +435,19 @@ const PortfolioTabs = ({ userAddress, client }) => {
                 )}
 
                 {/* Auto-refresh Toggle */}
-                {/* Auto-refresh Toggle - Only show after initial load */}
-                {hasFetched && (
-                    <div className="auto-refresh-toggle">
-                        <label>
-                            <input
-                                type="checkbox"
-                                checked={autoRefresh}
-                                onChange={(e) => setAutoRefresh(e.target.checked)}
-                            />
-                            <span className="refresh-icon">🔄</span>
-                            Auto-refresh every 30s
-                        </label>
-                    </div>
-                )}
+                <div className="auto-refresh-toggle">
+                    <label>
+                        <input
+                            type="checkbox"
+                            checked={autoRefresh}
+                            onChange={(e) => setAutoRefresh(e.target.checked)}
+                        />
+                        <span className="refresh-icon">🔄</span>
+                        Auto-refresh every 30s
+                    </label>
+                </div>
             </div>
-        </div >
+        </div>
     )
 }
 

@@ -22,6 +22,7 @@ const UserPortfolio = () => {
     const [loginMethod, setLoginMethod] = useState(null) // 'metamask' | 'email' | 'l1' | 'l2' | 'full'
     const [isL2Authenticated, setIsL2Authenticated] = useState(false)
     const [positions, setPositions] = useState([])
+    const [portfolioValue, setPortfolioValue] = useState(null)
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState(null)
     const [client, setClient] = useState(null)
@@ -49,6 +50,7 @@ const UserPortfolio = () => {
                     setLoginMethod(session.loginMethod)
                     setIsL2Authenticated(session.isL2Authenticated)
                     setPositions(session.positions || [])
+                    setPortfolioValue(session.portfolioValue || null)
 
                     // Note: Client will need to be re-initialized on first action
                     // This is acceptable as we're just restoring the UI state
@@ -128,10 +130,27 @@ const UserPortfolio = () => {
                 cashBalance,
                 loginMethod,
                 isL2Authenticated,
-                positions
+                positions,
+                portfolioValue
             })
         }
-    }, [address, username, profileImage, cashBalance, loginMethod, isL2Authenticated, positions])
+    }, [address, username, profileImage, cashBalance, loginMethod, isL2Authenticated, positions, portfolioValue])
+
+    const fetchPortfolioValue = async (userAddress) => {
+        try {
+            const res = await fetch(`https://data-api.polymarket.com/value?user=${userAddress}`)
+            if (res.ok) {
+                // The API usually returns the value directly as json number or string
+                const data = await res.json()
+                const val = parseFloat(data)
+                if (!isNaN(val)) {
+                    setPortfolioValue(val)
+                }
+            }
+        } catch (err) {
+            console.error("Failed to fetch portfolio value", err)
+        }
+    }
 
     // Authenticate L2 & Fetch Private Data
     const performL2Login = async (signer, userAddress, authType, proxyAddressOverride = null) => {
@@ -321,9 +340,12 @@ const UserPortfolio = () => {
             }
 
             // 8. Fetch Open Positions - Use PROXY address
-            const openPositions = await fetchPositions(proxyAddress)
+            fetchPositions(proxyAddress)
 
-            // 9. Fetch Closed Positions - Use PROXY address
+            // 9. Fetch Portfolio Value - Use PROXY address
+            fetchPortfolioValue(proxyAddress)
+
+            // 10. Fetch Closed Positions - Use PROXY address
             try {
                 const closedRes = await fetch(`https://data-api.polymarket.com/v1/closed-positions?user=${proxyAddress}&limit=50`)
                 if (closedRes.ok) {
@@ -368,8 +390,9 @@ const UserPortfolio = () => {
             setAddress(userAddress)
             setLoginMethod('l1')
 
-            // Fetch positions
+            // Fetch info
             fetchPositions(userAddress)
+            fetchPortfolioValue(userAddress)
 
             // Perform L2 login
             await performL2Login(wallet, userAddress, 'l1', proxyAddressInput)
@@ -429,8 +452,9 @@ const UserPortfolio = () => {
             } catch (l2Err) {
             }
 
-            // Fetch positions
+            // Fetch info
             fetchPositions(apiAddress)
+            fetchPortfolioValue(apiAddress)
 
         } catch (e) {
             setError(e.message)
@@ -459,8 +483,9 @@ const UserPortfolio = () => {
             setAddress(userAddress)
             setLoginMethod('full')
 
-            // Fetch positions
+            // Fetch info
             fetchPositions(userAddress)
+            fetchPortfolioValue(userAddress)
 
             // Perform L2 login
             await performL2Login(wallet, userAddress, 'full', proxyAddressInput)
@@ -499,9 +524,12 @@ const UserPortfolio = () => {
         setCashBalance(null)
         setLoginMethod(null)
         setIsL2Authenticated(false)
+        setPortfolioValue(null)
     }
 
-    const totalValue = positions.reduce((sum, p) => sum + (p.curPrice * p.size), 0)
+    // Use API portfolio value if available, otherwise fallback to calculated
+    const calculatedValue = positions.reduce((sum, p) => sum + (p.curPrice * p.size), 0)
+    const displayValue = portfolioValue !== null ? portfolioValue : calculatedValue
 
     if (!address) {
         return (
@@ -526,7 +554,7 @@ const UserPortfolio = () => {
             />
 
             <PortfolioStats
-                totalValue={totalValue}
+                totalValue={displayValue}
                 cashBalance={cashBalance}
                 isL2Authenticated={isL2Authenticated}
                 positionCount={positions.length}
