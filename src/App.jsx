@@ -15,11 +15,101 @@ function App() {
   const [modalMarket, setModalMarket] = useState(null) // For full modal
   const [selectedEventId, setSelectedEventId] = useState(null) // Focus mode state
 
-  // ... (fetchMarkets and calculateProfit remain unchanged) ...
+  const fetchMarkets = async () => {
+    setLoading(true)
+    setError(null)
+
+    try {
+      // Use local proxy server (now running on port 3001)
+      const API_URL = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
+
+      const response = await fetch(
+        `${API_URL}/api/data?tag_id=102467&limit=100&_t=${Date.now()}`
+      )
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+
+      const data = await response.json()
+
+      // Fetch live prices for each market from CLOB
+      const marketsWithLivePrices = await Promise.all(
+        data.map(async (event) => {
+          const market = event.markets?.[0]
+          if (!market) return event
+
+          try {
+            const tokenIds = JSON.parse(market.clobTokenIds || '[]')
+            const originalPrices = JSON.parse(market.outcomePrices || '[]')
+            const livePrices = []
+
+            // Fetch live price for each outcome
+            for (let i = 0; i < tokenIds.length; i++) {
+              const tokenId = tokenIds[i]
+              try {
+                const priceResponse = await fetch(
+                  `https://clob.polymarket.com/price?token_id=${tokenId}&side=buy`,
+                  { signal: AbortSignal.timeout(5000) } // 5 second timeout
+                )
+                if (priceResponse.ok) {
+                  const priceData = await priceResponse.json()
+                  livePrices.push(priceData.price || originalPrices[i] || '0')
+                } else {
+                  // Use original price if CLOB fails (e.g., 404)
+                  livePrices.push(originalPrices[i] || '0')
+                }
+              } catch (fetchErr) {
+                // Use original price on timeout or network error
+                livePrices.push(originalPrices[i] || '0')
+              }
+            }
+
+            // Update market with live prices
+            return {
+              ...event,
+              markets: [{
+                ...market,
+                outcomePrices: JSON.stringify(livePrices),
+                livePrices: livePrices,
+                lastUpdated: new Date().toISOString()
+              }]
+            }
+          } catch (err) {
+            return event
+          }
+        })
+      )
+
+      setMarkets(marketsWithLivePrices)
+      setLastUpdate(new Date().toLocaleTimeString())
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const calculateProfit = (price) => {
+    if (!price || price === 0) return { shares: 0, profit: 0 }
+    const priceNum = parseFloat(price)
+    if (priceNum === 0) return { shares: 0, profit: 0 }
+    const shares = 1.0 / priceNum
+    const profit = shares - 1.0
+    return { shares, profit }
+  }
 
   // Auto-refresh effect
   useEffect(() => {
-    // ...
+    let intervalId
+    if (autoRefresh && markets.length > 0) {
+      intervalId = setInterval(() => {
+        fetchMarkets()
+      }, refreshInterval * 1000)
+    }
+    return () => {
+      if (intervalId) clearInterval(intervalId)
+    }
   }, [autoRefresh, refreshInterval, markets.length])
 
   return (

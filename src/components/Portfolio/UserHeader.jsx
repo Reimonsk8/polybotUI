@@ -59,7 +59,17 @@ const UserHeader = ({ username, address, profileImage, isL2Authenticated, onDisc
                         </span>
                     )}
                 </div>
-                <button onClick={onDisconnect} className="disconnect-btn">Disconnect</button>
+                <button
+                    onClick={onDisconnect}
+                    className="disconnect-btn"
+                    style={{
+                        background: 'rgba(239, 68, 68, 0.15)',
+                        border: '1px solid var(--danger)',
+                        color: 'var(--danger)'
+                    }}
+                >
+                    Log Out
+                </button>
             </div>
         </div>
     )

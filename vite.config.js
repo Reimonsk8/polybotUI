@@ -9,7 +9,7 @@ export default defineConfig({
       process: "process/browser",
       stream: "stream-browserify",
       util: "util",
-      buffer: "buffer",
+      buffer: "buffer/",
       events: "events",
     },
   },
