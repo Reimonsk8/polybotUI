@@ -131,19 +131,22 @@ const UserPortfolio = () => {
     const performL2Login = async (signer, userAddress, authType, proxyAddressOverride = null) => {
         try {
             // 1. Get Proxy Address - Priority order:
-            // a) Override passed in
-            // b) Environment variable (most reliable if user has set it)
-            // c) API detection (may not work if APIs need proxy address)
+            // a) Environment variable VITE_PROXY_WALLET_ADDRESS (HIGHEST PRIORITY - set in .env)
+            // b) Override passed in as parameter
+            // c) API detection from positions/activity
             // d) Fallback to user address
-            let proxyAddress = proxyAddressOverride || import.meta.env.VITE_PROXY_WALLET_ADDRESS
+
+            // Start with env variable if available
+            let proxyAddress = import.meta.env.VITE_PROXY_WALLET_ADDRESS || proxyAddressOverride
             let name = null
             let image = null
 
+            console.log('[L2 Login] Checking proxy address from env:', import.meta.env.VITE_PROXY_WALLET_ADDRESS)
             console.log('[L2 Login] Starting with proxy address:', proxyAddress || 'will detect')
 
-            // Try to detect from API only if not provided
+            // Try to detect from API only if not provided in env or override
             if (!proxyAddress) {
-                console.log('[L2 Login] Attempting to detect proxy address from APIs')
+                console.log('[L2 Login] No proxy in env, attempting API detection')
                 try {
                     const posRes = await fetch(`https://data-api.polymarket.com/positions?user=${userAddress}&limit=1`)
                     if (posRes.ok) {
