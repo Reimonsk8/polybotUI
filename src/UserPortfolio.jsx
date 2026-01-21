@@ -178,8 +178,8 @@ const UserPortfolio = () => {
             proxyAddress = proxyAddress || userAddress
             console.log('[L2 Login] Using proxy address:', proxyAddress)
 
-            // Set a default username from address
-            setUsername(userAddress.slice(0, 6) + '...' + userAddress.slice(-4))
+            // Set a default username from PROXY address (this is the trading identity)
+            setUsername(proxyAddress.slice(0, 6) + '...' + proxyAddress.slice(-4))
 
             // 2. Init L1 Client
             // ChainId 137 for Polygon
@@ -240,7 +240,7 @@ const UserPortfolio = () => {
                 setCashBalance(0) // Set to 0 instead of leaving as null
             }
 
-            // 7. Fetch Profile Logic
+            // 7. Fetch Profile Logic - Use PROXY ADDRESS for profile
             let profileFound = false
 
             // Try Gamma API (via Proxy if available, otherwise direct)
@@ -249,9 +249,10 @@ const UserPortfolio = () => {
                 const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
                 const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
 
+                // IMPORTANT: Use proxyAddress (proxy wallet) not userAddress (regular wallet)
                 const profileUrl = useProxy
-                    ? `${proxyUrl}/gamma-api/public-profile?address=${userAddress}`
-                    : `https://gamma-api.polymarket.com/public-profile?address=${userAddress}`
+                    ? `${proxyUrl}/gamma-api/public-profile?address=${proxyAddress}`
+                    : `https://gamma-api.polymarket.com/public-profile?address=${proxyAddress}`
 
                 const profileRes = await fetch(profileUrl)
 
@@ -278,7 +279,8 @@ const UserPortfolio = () => {
             // This is expected for many users who haven't set up a public profile or if proxy is down
             if (!profileFound) {
                 try {
-                    const activityRes = await fetch(`https://data-api.polymarket.com/activity?user=${userAddress}&limit=1`)
+                    // Use PROXY address for activity lookup
+                    const activityRes = await fetch(`https://data-api.polymarket.com/activity?user=${proxyAddress}&limit=1`)
 
                     if (activityRes.ok) {
                         const activityData = await activityRes.json()
@@ -300,12 +302,12 @@ const UserPortfolio = () => {
                 }
             }
 
-            // 8. Fetch Open Positions
-            const openPositions = await fetchPositions(userAddress)
+            // 8. Fetch Open Positions - Use PROXY address
+            const openPositions = await fetchPositions(proxyAddress)
 
-            // 9. Fetch Closed Positions
+            // 9. Fetch Closed Positions - Use PROXY address
             try {
-                const closedRes = await fetch(`https://data-api.polymarket.com/v1/closed-positions?user=${userAddress}&limit=50`)
+                const closedRes = await fetch(`https://data-api.polymarket.com/v1/closed-positions?user=${proxyAddress}&limit=50`)
                 if (closedRes.ok) {
                     const closedData = await closedRes.json()
 
