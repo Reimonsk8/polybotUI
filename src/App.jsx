@@ -121,12 +121,14 @@ function App() {
               style={selectedEventId ? {
                 display: 'flex',
                 justifyContent: 'center',
-                padding: '2rem 0'
+                padding: '4rem 0',
+                minHeight: '60vh',
+                alignItems: 'flex-start'
               } : {}}
             >
               {markets
                 .sort((a, b) => new Date(a.endDate) - new Date(b.endDate))
-                .filter(event => selectedEventId ? event.id === selectedEventId : true)
+                .filter(event => selectedEventId ? String(event.id) === String(selectedEventId) : true)
                 .map((event, index) => {
                   const market = event.markets?.[0]
                   if (!market) return null
@@ -140,24 +142,26 @@ function App() {
                   const isClosingSoon = minutesUntilEnd < 5
 
                   // Force chart visible if selected
-                  const showChart = selectedEventId || expandedMarketId === market.id
+                  const showChart = selectedEventId ? true : expandedMarketId === market.id
 
                   return (
-                    <div key={event.id} className="timeline-card" style={selectedEventId ? { flex: '0 0 500px', maxWidth: '100%' } : {}}>
-                      {/* Timeline indicator - Hide in focus mode? Or keep? Let's keep for now */}
-                      <div className={`timeline-indicator ${isClosingSoon ? 'closing-soon' : ''}`}>
-                        <div className="time-badge">
-                          {minutesUntilEnd < 1 ? (
-                            <span className="closing-now">CLOSING NOW!</span>
-                          ) : minutesUntilEnd < 60 ? (
-                            <span>{minutesUntilEnd}m</span>
-                          ) : (
-                            <span>{Math.floor(minutesUntilEnd / 60)}h {minutesUntilEnd % 60}m</span>
-                          )}
+                    <div key={event.id} className="timeline-card" style={selectedEventId ? { flex: '0 0 500px', maxWidth: '100%', margin: '0 auto' } : {}}>
+                      {/* Timeline indicator - Hide in focus mode to avoid overlap */}
+                      {!selectedEventId && (
+                        <div className={`timeline-indicator ${isClosingSoon ? 'closing-soon' : ''}`}>
+                          <div className="time-badge">
+                            {minutesUntilEnd < 1 ? (
+                              <span className="closing-now">CLOSING NOW!</span>
+                            ) : minutesUntilEnd < 60 ? (
+                              <span>{minutesUntilEnd}m</span>
+                            ) : (
+                              <span>{Math.floor(minutesUntilEnd / 60)}h {minutesUntilEnd % 60}m</span>
+                            )}
+                          </div>
+                          <div className="timeline-dot"></div>
+                          <div className="timeline-line"></div>
                         </div>
-                        <div className="timeline-dot"></div>
-                        <div className="timeline-line"></div>
-                      </div>
+                      )}
 
                       {/* Market card content */}
                       <div className="market-card-timeline">
@@ -173,7 +177,7 @@ function App() {
                                 className="chart-toggle-btn"
                                 onClick={(e) => {
                                   e.stopPropagation()
-                                  setSelectedEventId(event.id)
+                                  setSelectedEventId(String(event.id))
                                 }}
                                 style={{ background: 'var(--accent-primary)' }}
                               >
@@ -188,7 +192,7 @@ function App() {
                                 }}
                                 style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}
                               >
-                                ✕ Close Logic
+                                ↩ Back to List
                               </button>
                             )}
                           </div>
