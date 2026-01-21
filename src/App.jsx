@@ -3,6 +3,7 @@ import './App.css'
 import MarketChart from './components/Charts/MarketChart'
 import MiniChart from './components/Charts/MiniChart'
 import UserPortfolio from './UserPortfolio'
+import FocusedMarketView from './components/FocusedMarketView'
 
 function App() {
   const [markets, setMarkets] = useState([])
@@ -206,38 +207,31 @@ function App() {
               </h2>
             )}
 
-            <div
-              className={selectedEventId ? "focused-view-container" : "timeline-carousel"}
-              style={selectedEventId ? {
-                display: 'flex',
-                justifyContent: 'center',
-                padding: '4rem 0',
-                minHeight: '60vh',
-                alignItems: 'flex-start'
-              } : {}}
-            >
-              {markets
-                .sort((a, b) => new Date(a.endDate) - new Date(b.endDate))
-                .filter(event => selectedEventId ? String(event.id) === String(selectedEventId) : true)
-                .map((event, index) => {
-                  const market = event.markets?.[0]
-                  if (!market) return null
+            {selectedEventId ? (
+              <div style={{ width: '100%', display: 'flex', justifyContent: 'center', padding: '2rem 0' }}>
+                {(() => {
+                  const event = markets.find(e => String(e.id) === String(selectedEventId))
+                  return event ? <FocusedMarketView event={event} /> : null
+                })()}
+              </div>
+            ) : (
+              <div className="timeline-carousel">
+                {markets
+                  .sort((a, b) => new Date(a.endDate) - new Date(b.endDate))
+                  .map((event, index) => {
+                    const market = event.markets?.[0]
+                    if (!market) return null
 
-                  const outcomes = JSON.parse(market.outcomes || '[]')
-                  const prices = JSON.parse(market.outcomePrices || '[]')
-                  const endTime = new Date(event.endDate)
-                  const now = new Date()
-                  const timeUntilEnd = Math.max(0, endTime - now)
-                  const minutesUntilEnd = Math.floor(timeUntilEnd / 60000)
-                  const isClosingSoon = minutesUntilEnd < 5
+                    const outcomes = JSON.parse(market.outcomes || '[]')
+                    const prices = JSON.parse(market.outcomePrices || '[]')
+                    const endTime = new Date(event.endDate)
+                    const now = new Date()
+                    const timeUntilEnd = Math.max(0, endTime - now)
+                    const minutesUntilEnd = Math.floor(timeUntilEnd / 60000)
+                    const isClosingSoon = minutesUntilEnd < 5
 
-                  // Force chart visible if selected
-                  const showChart = selectedEventId ? true : expandedMarketId === market.id
-
-                  return (
-                    <div key={event.id} className="timeline-card" style={selectedEventId ? { flex: '0 0 500px', maxWidth: '100%', margin: '0 auto' } : {}}>
-                      {/* Timeline indicator - Hide in focus mode to avoid overlap */}
-                      {!selectedEventId && (
+                    return (
+                      <div key={event.id} className="timeline-card">
                         <div className={`timeline-indicator ${isClosingSoon ? 'closing-soon' : ''}`}>
                           <div className="time-badge">
                             {minutesUntilEnd < 1 ? (
@@ -251,18 +245,14 @@ function App() {
                           <div className="timeline-dot"></div>
                           <div className="timeline-line"></div>
                         </div>
-                      )}
 
-                      {/* Market card content */}
-                      <div className="market-card-timeline">
-                        <div className="market-header">
-                          <h3 className="market-title-compact">{event.title}</h3>
-                          <div className="market-meta">
-                            <span className="meta-item">
-                              🎯 {endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                            </span>
-
-                            {!selectedEventId ? (
+                        <div className="market-card-timeline">
+                          <div className="market-header">
+                            <h3 className="market-title-compact">{event.title}</h3>
+                            <div className="market-meta">
+                              <span className="meta-item">
+                                🎯 {endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </span>
                               <button
                                 className="chart-toggle-btn"
                                 onClick={(e) => {
@@ -273,88 +263,75 @@ function App() {
                               >
                                 👉 Select Trade
                               </button>
-                            ) : (
-                              <button
-                                className="chart-toggle-btn"
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  setSelectedEventId(null)
-                                }}
-                                style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}
-                              >
-                                ↩ Back to List
-                              </button>
-                            )}
-                          </div>
-                        </div>
-
-                        <div className="outcomes-compact">
-                          {outcomes.map((outcome, idx) => {
-                            const price = parseFloat(prices[idx] || 0)
-                            const probability = price * 100
-                            const { shares, profit } = calculateProfit(price)
-
-                            return (
-                              <div
-                                key={idx}
-                                className={`outcome-card-compact ${outcome.toLowerCase()}`}
-                              >
-                                <div className="outcome-header-compact">
-                                  <span className="outcome-icon">
-                                    {outcome === 'Up' ? '📈' : '📉'}
-                                  </span>
-                                  <h4 className="outcome-name-compact">{outcome.toUpperCase()}</h4>
-                                  <span className="probability-compact">{probability.toFixed(1)}%</span>
-                                </div>
-
-                                <div className="outcome-stats">
-                                  <div className="stat-compact">
-                                    <span className="stat-label-compact">Price</span>
-                                    <span className="stat-value-compact">${price.toFixed(3)}</span>
-                                  </div>
-                                  <div className="stat-compact highlight-stat">
-                                    <span className="stat-label-compact">$1 → Profit</span>
-                                    <span className="profit-value-compact">${profit.toFixed(2)}</span>
-                                  </div>
-                                </div>
-                              </div>
-                            )
-                          })}
-                        </div>
-
-                        {/* Mini Chart - shown when expanded OR selected */}
-                        {showChart && (
-                          <MiniChart
-                            market={market}
-                            onClick={() => setModalMarket(market)}
-                          />
-                        )}
-
-                        <div className="market-footer">
-                          <div className="volume-indicator">
-                            <span className="volume-label">Vol:</span>
-                            <span className="volume-value">
-                              ${(market.volumeNum || 0).toLocaleString(undefined, {
-                                maximumFractionDigits: 0
-                              })}
-                            </span>
+                            </div>
                           </div>
 
-                          {/* If selected, maybe hide this detailed trade link? Or keep it? User said "Select Trade" button logic... keeping link is fine. */}
-                          <a
-                            href={`https://polymarket.com/event/${event.slug}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="trade-link-compact"
-                          >
-                            Trade on Poly →
-                          </a>
+                          <div className="outcomes-compact">
+                            {outcomes.map((outcome, idx) => {
+                              const price = parseFloat(prices[idx] || 0)
+                              const probability = price * 100
+                              const { profit } = calculateProfit(price)
+
+                              return (
+                                <div
+                                  key={idx}
+                                  className={`outcome-card-compact ${outcome.toLowerCase()}`}
+                                >
+                                  <div className="outcome-header-compact">
+                                    <span className="outcome-icon">
+                                      {outcome === 'Up' ? '📈' : '📉'}
+                                    </span>
+                                    <h4 className="outcome-name-compact">{outcome.toUpperCase()}</h4>
+                                    <span className="probability-compact">{probability.toFixed(1)}%</span>
+                                  </div>
+
+                                  <div className="outcome-stats">
+                                    <div className="stat-compact">
+                                      <span className="stat-label-compact">Price</span>
+                                      <span className="stat-value-compact">${price.toFixed(3)}</span>
+                                    </div>
+                                    <div className="stat-compact highlight-stat">
+                                      <span className="stat-label-compact">$1 → Profit</span>
+                                      <span className="profit-value-compact">${profit.toFixed(2)}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              )
+                            })}
+                          </div>
+
+                          {/* Mini Chart if Expanded */}
+                          {expandedMarketId === market.id && (
+                            <MiniChart
+                              market={market}
+                              onClick={() => setModalMarket(market)}
+                            />
+                          )}
+
+                          <div className="market-footer">
+                            <div className="volume-indicator">
+                              <span className="volume-label">Vol:</span>
+                              <span className="volume-value">
+                                ${(market.volumeNum || 0).toLocaleString(undefined, {
+                                  maximumFractionDigits: 0
+                                })}
+                              </span>
+                            </div>
+                            <a
+                              href={`https://polymarket.com/event/${event.slug}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="trade-link-compact"
+                            >
+                              Trade on Poly →
+                            </a>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  )
-                })}
-            </div>
+                    )
+                  })}
+              </div>
+            )}
 
             {!selectedEventId && (
               <div className="scroll-hint">
