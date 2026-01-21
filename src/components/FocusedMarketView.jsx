@@ -19,6 +19,7 @@ const FocusedMarketView = ({ event }) => {
     const [currentAssetPrice, setCurrentAssetPrice] = useState(null)
     const [isAssetConnected, setIsAssetConnected] = useState(false)
     const assetWsRef = useRef(null)
+    const [assetError, setAssetError] = useState(null)
 
     // Countdown State
     const [timeLeft, setTimeLeft] = useState('')
@@ -27,7 +28,6 @@ const FocusedMarketView = ({ event }) => {
     useEffect(() => {
         if (!event) return
 
-        // Symbol
         const t = event.title.toLowerCase()
         let symbol = null
         if (t.includes('bitcoin') || t.includes('btc')) symbol = 'btcusdt'
@@ -35,7 +35,6 @@ const FocusedMarketView = ({ event }) => {
         else if (t.includes('solana') || t.includes('sol')) symbol = 'solusdt'
         setAssetSymbol(symbol)
 
-        // Target Price
         const desc = event.description || ''
         const title = event.title || ''
         const text = title + " " + desc
@@ -69,53 +68,75 @@ const FocusedMarketView = ({ event }) => {
         return () => clearInterval(interval)
     }, [event?.endDate])
 
-    // Helper to process a single logical message
+
+    // HELPER: Process generic Outcome Updates (Price Change & Book)
     const processOutcomeMessage = (data, tokenIds) => {
         if (!data) return false
 
-        // HANDLE PRICE CHANGE
-        // Check for both legacy "changes" (if any) and new "price_changes"
+        let newUp = null
+        let newDown = null
+        let changed = false
+
+        // A. Handle 'price_change' or 'diff'
         const changes = data.price_changes || data.changes
         if ((data.event_type === 'price_change' || data.event_type === 'diff') && changes) {
+            changes.forEach(change => {
+                const price = parseFloat(change.price)
+                if (change.asset_id === tokenIds[0]) newUp = price
+                else if (change.asset_id === tokenIds[1]) newDown = price
+            })
+        }
+
+        // B. Handle 'book' snapshots (Bids/Asks)
+        // Helper: get best price from bids/asks (mid price or just match)
+        // Polymarket 'price' usually refers to the last trade or mid price.
+        // Let's use the BEST BID as the sell price, or BEST ASK as buy price.
+        // For simplicity, let's look for `last_trade_price` if available, or best bid.
+        if (data.event_type === 'book') {
+            const assetId = data.asset_id
+
+            // If data has explicit bids array
+            if (data.bids && data.bids.length > 0) {
+                // Best bid is usually first? Or parse.
+                // The array is sorted? Usually best bid is highest price.
+                // let's assume sorted descending or check.
+                const bestBid = data.bids.reduce((max, b) => Math.max(max, parseFloat(b.price)), 0)
+
+                if (assetId === tokenIds[0]) newUp = bestBid
+                else if (assetId === tokenIds[1]) newDown = bestBid
+            }
+        }
+
+        // Apply changes
+        if (newUp !== null || newDown !== null) {
             setLivePrices(prev => {
-                let newUp = prev.up
-                let newDown = prev.down
-                let changed = false
+                const updatedUp = newUp !== null ? newUp : prev.up
+                const updatedDown = newDown !== null ? newDown : prev.down
 
-                changes.forEach(change => {
-                    const price = parseFloat(change.price)
-                    if (change.asset_id === tokenIds[0]) {
-                        newUp = price
-                        changed = true
-                    } else if (change.asset_id === tokenIds[1]) {
-                        newDown = price
-                        changed = true
-                    }
-                })
-
-                if (changed) {
+                if (updatedUp !== prev.up || updatedDown !== prev.down) {
+                    changed = true
                     setPriceHistory(h => [...h, {
                         time: new Date().toLocaleTimeString(),
                         timestamp: Date.now(),
-                        upPrice: newUp,
-                        downPrice: newDown
+                        upPrice: updatedUp,
+                        downPrice: updatedDown
                     }].slice(-50))
+                    return { up: updatedUp, down: updatedDown }
                 }
-                return { up: newUp, down: newDown }
+                return prev
             })
             return true
         }
         return false
     }
 
-    // 3. WS 1: MARKET OUTCOMES (Improved Parsing)
+    // 3. WS 1: MARKET OUTCOMES (Book & Diff)
     useEffect(() => {
         if (!market) return
 
         const tokenIds = JSON.parse(market.clobTokenIds || '[]')
         const currentPrices = JSON.parse(market.outcomePrices || '[]')
 
-        // Initial setup
         const initialUp = parseFloat(currentPrices[0] || 0)
         const initialDown = parseFloat(currentPrices[1] || 0)
         setLivePrices({ up: initialUp, down: initialDown })
@@ -143,12 +164,8 @@ const FocusedMarketView = ({ event }) => {
         ws.onmessage = (e) => {
             try {
                 const raw = JSON.parse(e.data)
-                // Normalize to array
                 const messages = Array.isArray(raw) ? raw : [raw]
-
-                messages.forEach(msg => {
-                    processOutcomeMessage(msg, tokenIds)
-                })
+                messages.forEach(msg => processOutcomeMessage(msg, tokenIds))
             } catch (err) { }
         }
 
@@ -157,23 +174,40 @@ const FocusedMarketView = ({ event }) => {
     }, [market])
 
 
-    // 4. WS 2: ASSET PRICES (Robust Connection)
+    // 4. WS 2: ASSET PRICES (Try multiple endpoints if needed)
     useEffect(() => {
         if (!assetSymbol) return
+
+        // NOTE: Trying separate endpoint based on documentation hints
+        // But main doc says crypto_prices is a topic on the main channel?
+        // Let's try `ws/market` first (default) but ensure we catch the 'updates'.
+        // If that fails, the fallback is harder without a proxy.
+        // User provided screenshot implies they connect to `ws-subscriptions-clob`.
 
         const ws = new WebSocket('wss://ws-subscriptions-clob.polymarket.com/ws/market')
         assetWsRef.current = ws
 
         ws.onopen = () => {
             setIsAssetConnected(true)
-            // Try string format "btcusdt" as per some docs
             ws.send(JSON.stringify({
                 action: "subscribe",
                 subscriptions: [
                     {
                         topic: "crypto_prices",
                         type: "update",
-                        filters: assetSymbol // Passing string directly
+                        filters: [assetSymbol] // Try array again? Or string.
+                        // Filter logic on server might require array of strings for multiple.
+                    }
+                ]
+            }))
+            // Redundancy: send string format too
+            ws.send(JSON.stringify({
+                action: "subscribe",
+                subscriptions: [
+                    {
+                        topic: "crypto_prices",
+                        type: "update",
+                        filters: assetSymbol
                     }
                 ]
             }))
@@ -182,16 +216,12 @@ const FocusedMarketView = ({ event }) => {
         ws.onmessage = (e) => {
             try {
                 const raw = JSON.parse(e.data)
-                // Handle Array or Single Object
                 const messages = Array.isArray(raw) ? raw : [raw]
 
                 messages.forEach(msg => {
-                    if (msg.topic === 'crypto_prices' && msg.payload) {
+                    // Check for Crypto Price Update
+                    if ((msg.topic === 'crypto_prices' || msg.event_type === 'crypto_prices') && msg.payload) {
                         const price = parseFloat(msg.payload.value)
-
-                        // Check if symbol matches (optional safety)
-                        // msg.payload.symbol should match assetSymbol or be close (e.g. "BTCUSDT")
-
                         setCurrentAssetPrice(price)
                         setAssetPriceHistory(h => [...h, {
                             time: new Date(msg.payload.timestamp || Date.now()).toLocaleTimeString(),
@@ -215,16 +245,12 @@ const FocusedMarketView = ({ event }) => {
         return ((1 / price) - 1)
     }
 
-    // Determine which chart to show
     const showAssetChart = assetSymbol && currentAssetPrice
 
     // Y-Domain
     const yDomain = showAssetChart && targetPrice
         ? [Math.min(currentAssetPrice, targetPrice) * 0.999, Math.max(currentAssetPrice, targetPrice) * 1.001]
         : ['auto', 'auto']
-
-    // Toggle Button (Optional, or just Auto)
-    // We stay in Auto mode: IF asset data exists, show it.
 
     const ChartComponent = showAssetChart ? (
         <ResponsiveContainer width="100%" height="100%" minHeight={450}>
@@ -258,7 +284,7 @@ const FocusedMarketView = ({ event }) => {
                     strokeWidth={3}
                     dot={false}
                     animationDuration={300}
-                    isAnimationActive={false} // Disable animation for smoother realtime updates
+                    isAnimationActive={false}
                 />
             </LineChart>
         </ResponsiveContainer>
@@ -266,7 +292,7 @@ const FocusedMarketView = ({ event }) => {
         <ResponsiveContainer width="100%" height="100%" minHeight={450}>
             <LineChart data={priceHistory}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.3} />
-                <XAxis dataKey="time" stroke="#64748b" tick={{ fontSize: 11 }} />
+                <XAxis dataKey="time" stroke="#64748b" tick={{ fontSize: 11 }} minTickGap={50} />
                 <YAxis stroke="#64748b" domain={[0, 1]} tickFormatter={v => `${(v * 100).toFixed(0)}%`} />
                 <Tooltip contentStyle={{ background: '#0f172a' }} formatter={v => `${(v * 100).toFixed(1)}%`} />
                 <Legend />
@@ -286,7 +312,6 @@ const FocusedMarketView = ({ event }) => {
                         <div>
                             <h2 style={{ fontSize: '1.8rem', margin: 0, letterSpacing: '-0.5px' }}>{event.title}</h2>
                             <div className="focused-meta">
-                                {/* Countdown Timer */}
                                 <span style={{
                                     color: '#f59e0b',
                                     fontWeight: '700',
@@ -295,14 +320,13 @@ const FocusedMarketView = ({ event }) => {
                                 }}>
                                     ⏱ {timeLeft}
                                 </span>
-
                                 <span style={{ opacity: 0.7 }}>| Vol: ${(market.volumeNum || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                {/* Price Stats (Asset Chart Mode) */}
+                {/* Stat Headers */}
                 {showAssetChart && targetPrice && (
                     <div className="price-stats-header" style={{ display: 'flex', gap: '3rem', alignItems: 'center' }}>
                         <div style={{ textAlign: 'right' }}>
@@ -329,7 +353,6 @@ const FocusedMarketView = ({ event }) => {
 
             {/* Outcomes & Profit Calc */}
             <div className="focused-outcomes">
-                {/* UP Outcome */}
                 <div className="focused-outcome-card up">
                     <div className="outcome-header-row">
                         <div className="outcome-label">📈 {outcomes[0] || 'UP'}</div>
@@ -345,7 +368,6 @@ const FocusedMarketView = ({ event }) => {
                     <a href={`https://polymarket.com/event/${event.slug}`} target="_blank" rel="noreferrer" className="trade-btn-large">Bet UP</a>
                 </div>
 
-                {/* DOWN Outcome */}
                 <div className="focused-outcome-card down">
                     <div className="outcome-header-row">
                         <div className="outcome-label">📉 {outcomes[1] || 'DOWN'}</div>
