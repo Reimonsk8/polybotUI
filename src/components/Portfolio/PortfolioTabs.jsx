@@ -10,104 +10,74 @@ const PortfolioTabs = ({ userAddress, client }) => {
     const [loading, setLoading] = useState(false)
     const [autoRefresh, setAutoRefresh] = useState(false)
 
-    // Fetch Active Bets using L2 authenticated client methods
+    // Fetch Active Bets using Data API /positions endpoint
     const fetchActiveBets = async () => {
         try {
-            if (!client) {
+            if (!userAddress) {
+                console.warn('[Active Bets] No user address available')
                 return
             }
 
-            // Get open orders and recent trades to build position data
-            const [openOrders, trades] = await Promise.all([
-                client.getOpenOrders(),
-                client.getTrades({ limit: 100 })
-            ])
+            console.log('[Active Bets] Fetching positions for:', userAddress)
 
-            // Calculate positions from trades
-            const positionMap = new Map()
+            const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
+            const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
 
-            trades.forEach(trade => {
-                const key = `${trade.market}-${trade.asset_id}`
-                if (!positionMap.has(key)) {
-                    positionMap.set(key, {
-                        market: trade.market,
-                        asset_id: trade.asset_id,
-                        outcome: trade.outcome,
-                        size: 0,
-                        totalCost: 0,
-                        trades: []
-                    })
-                }
-
-                const position = positionMap.get(key)
-                const tradeSize = parseFloat(trade.size)
-                const tradePrice = parseFloat(trade.price)
-
-                if (trade.side === 'BUY') {
-                    position.size += tradeSize
-                    position.totalCost += tradeSize * tradePrice
-                } else {
-                    position.size -= tradeSize
-                    position.totalCost -= tradeSize * tradePrice
-                }
-                position.trades.push(trade)
+            // Use Data API /positions endpoint with proper query parameters
+            const params = new URLSearchParams({
+                user: userAddress,
+                sizeThreshold: '1',
+                limit: '100',
+                sortBy: 'TOKENS',
+                sortDirection: 'DESC'
             })
 
-            // Filter to only active positions (size > 0) and enrich with market data
-            const activePositions = Array.from(positionMap.values())
-                .filter(p => p.size > 0.001) // Small threshold for floating point
-                .map(p => ({
-                    ...p,
-                    avgPrice: p.totalCost / p.size,
-                    conditionId: p.market,
-                    title: p.outcome || 'Unknown Market'
-                }))
+            const positionsUrl = useProxy
+                ? `${proxyUrl}/api/data-api/positions?${params.toString()}`
+                : `https://data-api.polymarket.com/positions?${params.toString()}`
 
-            // Enrich with Gamma API market metadata (Sequential to avoid 429s)
-            const enrichedPositions = []
-            for (const position of activePositions) {
-                try {
-                    const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
-                    const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
+            console.log('[Active Bets] Fetching from:', positionsUrl.replace(userAddress, userAddress.slice(0, 10) + '...'))
 
-                    const marketUrl = useProxy
-                        ? `${proxyUrl}/api/gamma-api/markets?condition_id=${position.conditionId}`
-                        : `https://gamma-api.polymarket.com/markets?condition_id=${position.conditionId}`
+            const response = await fetch(positionsUrl)
 
-                    const marketRes = await fetch(marketUrl)
-                    if (marketRes.ok) {
-                        const marketDataList = await marketRes.json()
-                        const marketData = Array.isArray(marketDataList) ? marketDataList[0] : marketDataList
-
-                        if (marketData) {
-                            enrichedPositions.push({
-                                ...position,
-                                marketData,
-                                title: marketData.question || position.title,
-                                image: marketData.icon || marketData.image,
-                                icon: marketData.icon || marketData.image,
-                                slug: marketData.slug,
-                                description: marketData.description,
-                                category: marketData.category,
-                                endDate: marketData.endDate,
-                                volume: marketData.volume
-                            })
-                            continue
-                        }
-                    }
-                } catch (err) {
-                    console.warn(`Failed to fetch metadata for ${position.conditionId}`, err)
-                }
-                // Fallback if fetch failed
-                enrichedPositions.push(position)
-
-                // Small delay to be nice to the API
-                await new Promise(resolve => setTimeout(resolve, 100))
+            if (!response.ok) {
+                const errorText = await response.text()
+                console.error('[Active Bets] API error:', response.status, errorText)
+                setActiveBets([])
+                return
             }
 
-            setActiveBets(enrichedPositions)
+            const positions = await response.json()
+            console.log('[Active Bets] Received:', positions?.length || 0, 'positions')
+
+            if (Array.isArray(positions) && positions.length > 0) {
+                // Map to our internal format
+                const mappedPositions = positions.map(pos => ({
+                    ...pos,
+                    market: pos.conditionId,
+                    conditionId: pos.conditionId,
+                    marketData: {
+                        question: pos.title,
+                        icon: pos.icon,
+                        slug: pos.slug,
+                        endDate: pos.endDate
+                    },
+                    image: pos.icon,
+                    curPrice: pos.curPrice,
+                    pnl: pos.cashPnl,
+                    percentPnl: pos.percentPnl
+                }))
+
+                setActiveBets(mappedPositions)
+                console.log('[Active Bets] Successfully loaded', mappedPositions.length, 'positions')
+            } else {
+                setActiveBets([])
+                console.log('[Active Bets] No positions found')
+            }
+
         } catch (err) {
-            // Silently fail
+            console.error('[Active Bets] Failed to fetch:', err)
+            setActiveBets([])
         }
     }
 
