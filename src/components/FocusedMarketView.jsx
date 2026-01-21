@@ -1,15 +1,50 @@
 import { useState, useEffect, useRef } from 'react'
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts'
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceLine } from 'recharts'
 import './FocusedMarketView.css'
 
 const FocusedMarketView = ({ event }) => {
     const market = event.markets?.[0]
-    const [priceHistory, setPriceHistory] = useState([])
+    const outcomes = JSON.parse(market?.outcomes || '[]')
+
+    // Outcome Pricing State
+    const [priceHistory, setPriceHistory] = useState([]) // Outcome prices (0-1)
     const [livePrices, setLivePrices] = useState({ up: 0, down: 0 })
     const [isConnected, setIsConnected] = useState(false)
     const wsRef = useRef(null)
 
-    // WebSocket Connection
+    // Asset Pricing State (For the "Bitcoin" chart)
+    const [assetSymbol, setAssetSymbol] = useState(null)
+    const [targetPrice, setTargetPrice] = useState(null)
+    const [assetPriceHistory, setAssetPriceHistory] = useState([])
+    const [currentAssetPrice, setCurrentAssetPrice] = useState(null)
+    const [isAssetConnected, setIsAssetConnected] = useState(false)
+    const assetWsRef = useRef(null)
+
+    // PARSE METADATA
+    useEffect(() => {
+        if (!event) return
+
+        // 1. Detect Symbol
+        const t = event.title.toLowerCase()
+        let symbol = null
+        if (t.includes('bitcoin') || t.includes('btc')) symbol = 'btcusdt'
+        else if (t.includes('ethereum') || t.includes('eth')) symbol = 'ethusdt'
+        else if (t.includes('solana') || t.includes('sol')) symbol = 'solusdt'
+        setAssetSymbol(symbol)
+
+        // 2. Detect Target Price (Strike)
+        // Regex for price with optional commas and decimals
+        const desc = event.description || ''
+        const title = event.title || ''
+        const text = title + " " + desc
+        const match = text.match(/\$([0-9,]+(\.[0-9]{2})?)/)
+        if (match) {
+            setTargetPrice(parseFloat(match[1].replace(/,/g, '')))
+        }
+    }, [event])
+
+
+    // WS 1: MARKET OUTCOMES (Existing Logic)
     useEffect(() => {
         if (!market) return
 
@@ -21,7 +56,6 @@ const FocusedMarketView = ({ event }) => {
         const initialDown = parseFloat(currentPrices[1] || 0)
         setLivePrices({ up: initialUp, down: initialDown })
 
-        // Initialize history
         setPriceHistory([{
             time: new Date().toLocaleTimeString(),
             timestamp: Date.now(),
@@ -64,115 +98,172 @@ const FocusedMarketView = ({ event }) => {
                         })
 
                         if (changed) {
-                            setPriceHistory(h => {
-                                const newPoint = {
-                                    time: new Date().toLocaleTimeString(),
-                                    timestamp: Date.now(),
-                                    upPrice: newUp,
-                                    downPrice: newDown
-                                }
-                                return [...h, newPoint].slice(-100)
-                            })
-                        }
-                        return { up: newUp, down: newDown }
-                    })
-                } else if (data.event_type === 'book' || data.event_type === 'last_trade_price') {
-                    // Fallback for direct price updates
-                    setLivePrices(prev => {
-                        let newUp = prev.up
-                        let newDown = prev.down
-                        let changed = false
-
-                        const price = parseFloat(data.price)
-                        if (!isNaN(price)) {
-                            if (data.asset_id === tokenIds[0]) {
-                                newUp = price
-                                changed = true
-                            } else if (data.asset_id === tokenIds[1]) {
-                                newDown = price
-                                changed = true
-                            }
-                        }
-
-                        if (changed) {
-                            setPriceHistory(h => {
-                                const newPoint = {
-                                    time: new Date().toLocaleTimeString(),
-                                    timestamp: Date.now(),
-                                    upPrice: newUp,
-                                    downPrice: newDown
-                                }
-                                return [...h, newPoint].slice(-100)
-                            })
+                            setPriceHistory(h => [...h, {
+                                time: new Date().toLocaleTimeString(),
+                                timestamp: Date.now(),
+                                upPrice: newUp,
+                                downPrice: newDown
+                            }].slice(-50))
                         }
                         return { up: newUp, down: newDown }
                     })
                 }
-            } catch (err) {
-                console.error("WS Error", err)
-            }
+            } catch (err) { }
         }
 
         ws.onclose = () => setIsConnected(false)
-
         return () => ws.close()
     }, [market])
 
-    if (!market) return <div className="loading">Loading Market Data...</div>
 
-    const outcomes = JSON.parse(market.outcomes || '[]')
+    // WS 2: ASSET PRICES (New Logic)
+    useEffect(() => {
+        if (!assetSymbol) return
+
+        const ws = new WebSocket('wss://ws-subscriptions-clob.polymarket.com/ws/market')
+        assetWsRef.current = ws
+
+        ws.onopen = () => {
+            setIsAssetConnected(true)
+            // Subscribe to crypto_prices topic
+            // Tried formats: "filters": "btcusdt"
+            ws.send(JSON.stringify({
+                action: "subscribe",
+                subscriptions: [
+                    {
+                        topic: "crypto_prices",
+                        type: "update",
+                        filters: [assetSymbol] // Try array format
+                    }
+                ]
+            }))
+        }
+
+        ws.onmessage = (e) => {
+            try {
+                const msg = JSON.parse(e.data)
+                // Expected: { topic: "crypto_prices", payload: { symbol: "btcusdt", value: 67234.50, timestamp: ... } }
+                if (msg.topic === 'crypto_prices' && msg.payload) {
+                    const price = parseFloat(msg.payload.value)
+                    setCurrentAssetPrice(price)
+                    setAssetPriceHistory(h => [...h, {
+                        time: new Date(msg.payload.timestamp || Date.now()).toLocaleTimeString(),
+                        timestamp: msg.payload.timestamp,
+                        price: price
+                    }].slice(-50))
+                }
+            } catch (err) { }
+        }
+
+        ws.onclose = () => setIsAssetConnected(false)
+        return () => ws.close()
+
+    }, [assetSymbol])
+
+    if (!market) return <div className="loading">Loading Market Data...</div>
 
     const calculateProfit = (price) => {
         if (!price || price === 0) return 0
-        // Profit for $1 bet = (1 / price) - 1 (cost basis)
-        // Or simply: Payout $1 / Price = Shares. Shares - $1 cost = Profit.
-        // Or simpler: $1 buys (1/Price) shares. At $1 payout: (1/Price) * $1 = Value. Value - $1 = Profit.
         return ((1 / price) - 1)
     }
+
+    // Determine which chart to show
+    const showAssetChart = assetSymbol && currentAssetPrice
+
+    // Calculate Y-Axis domain for Asset Chart to be tight
+    const yDomain = showAssetChart && targetPrice
+        ? [Math.min(currentAssetPrice, targetPrice) * 0.999, Math.max(currentAssetPrice, targetPrice) * 1.001]
+        : ['auto', 'auto']
+
+    const ChartComponent = showAssetChart ? (
+        <ResponsiveContainer width="100%" height="100%" minHeight={450}>
+            <LineChart data={assetPriceHistory}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.3} />
+                <XAxis dataKey="time" stroke="#64748b" tick={{ fontSize: 11 }} minTickGap={50} />
+                <YAxis
+                    stroke="#64748b"
+                    domain={yDomain}
+                    tickFormatter={v => `$${v.toLocaleString()}`}
+                    width={80}
+                />
+                <Tooltip
+                    contentStyle={{ background: '#0f172a', border: '1px solid #334155' }}
+                    formatter={v => [`$${parseFloat(v).toLocaleString()}`, 'Price']}
+                />
+
+                {targetPrice && (
+                    <ReferenceLine
+                        y={targetPrice}
+                        stroke="#94a3b8"
+                        strokeDasharray="5 5"
+                        label={{ value: 'Target', position: 'right', fill: '#94a3b8' }}
+                    />
+                )}
+
+                <Line
+                    type="monotone"
+                    dataKey="price"
+                    stroke="#f59e0b" // Gold for Bitcoin
+                    strokeWidth={3}
+                    dot={false}
+                    animationDuration={300}
+                />
+            </LineChart>
+        </ResponsiveContainer>
+    ) : (
+        // Fallback to Outcome Chart (Existing)
+        <ResponsiveContainer width="100%" height="100%" minHeight={450}>
+            <LineChart data={priceHistory}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.3} />
+                <XAxis dataKey="time" stroke="#64748b" tick={{ fontSize: 11 }} />
+                <YAxis stroke="#64748b" domain={[0, 1]} tickFormatter={v => `${(v * 100).toFixed(0)}%`} />
+                <Tooltip contentStyle={{ background: '#0f172a' }} formatter={v => `${(v * 100).toFixed(1)}%`} />
+                <Legend />
+                <Line type="stepAfter" dataKey="upPrice" stroke="#10b981" strokeWidth={3} dot={false} name="UP" />
+                <Line type="stepAfter" dataKey="downPrice" stroke="#ef4444" strokeWidth={3} dot={false} name="DOWN" />
+            </LineChart>
+        </ResponsiveContainer>
+    )
 
     return (
         <div className="focused-market-view">
             {/* Header */}
             <div className="focused-header">
                 <div className="focused-title">
-                    <h2>{event.title}</h2>
-                    <div className="focused-meta">
-                        <span>End: {new Date(event.endDate).toLocaleString()}</span>
-                        <span>Vol: ${(market.volumeNum || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        <img src={event.icon} alt="" style={{ width: 48, height: 48, borderRadius: '50%' }} onError={e => e.target.style.display = 'none'} />
+                        <div>
+                            <h2 style={{ fontSize: '1.8rem', margin: 0 }}>{event.title}</h2>
+                            <div className="focused-meta">
+                                <span>{new Date(event.startDate).toLocaleString()} - {new Date(event.endDate).toLocaleString()}</span>
+                            </div>
+                        </div>
                     </div>
                 </div>
+
+                {/* Price Stats (Asset Chart Mode) */}
+                {showAssetChart && targetPrice && (
+                    <div className="price-stats-header" style={{ display: 'flex', gap: '3rem', alignItems: 'center' }}>
+                        <div style={{ textAlign: 'right' }}>
+                            <div style={{ color: '#94a3b8', fontSize: '0.9rem', fontWeight: '600' }}>PRICE TO BEAT</div>
+                            <div style={{ fontSize: '1.6rem', fontWeight: '700', color: '#e2e8f0' }}>${targetPrice.toLocaleString()}</div>
+                        </div>
+                        <div style={{ textAlign: 'right' }}>
+                            <div style={{ color: '#f59e0b', fontSize: '0.9rem', fontWeight: '600' }}>CURRENT PRICE</div>
+                            <div style={{ fontSize: '1.6rem', fontWeight: '700', color: '#f59e0b' }}>${currentAssetPrice.toLocaleString()}</div>
+                        </div>
+                    </div>
+                )}
+
                 <div className="live-indicator">
                     <div className="live-dot" style={{ background: isConnected ? '#10b981' : '#64748b', animation: isConnected ? 'pulse 2s infinite' : 'none' }}></div>
-                    {isConnected ? 'LIVE FEED ACTIVE' : 'CONNECTING...'}
+                    {isConnected ? 'LIVE' : '...'}
                 </div>
             </div>
 
             {/* Main Chart */}
-            <div className="focused-chart-container">
-                <ResponsiveContainer width="100%" height="100%" minHeight={400}>
-                    <LineChart data={priceHistory}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.5} />
-                        <XAxis
-                            dataKey="time"
-                            stroke="#94a3b8"
-                            tick={{ fill: '#94a3b8', fontSize: 11 }}
-                            minTickGap={50}
-                        />
-                        <YAxis
-                            stroke="#94a3b8"
-                            tick={{ fill: '#94a3b8', fontSize: 11 }}
-                            domain={[0, 1]}
-                            tickFormatter={v => `${(v * 100).toFixed(0)}%`}
-                        />
-                        <Tooltip
-                            contentStyle={{ background: '#0f172a', border: '1px solid #334155' }}
-                            formatter={v => `${(v * 100).toFixed(1)}%`}
-                        />
-                        <Legend />
-                        <Line type="stepAfter" dataKey="upPrice" stroke="#10b981" strokeWidth={3} dot={false} name={outcomes[0] || 'UP'} animationDuration={300} />
-                        <Line type="stepAfter" dataKey="downPrice" stroke="#ef4444" strokeWidth={3} dot={false} name={outcomes[1] || 'DOWN'} animationDuration={300} />
-                    </LineChart>
-                </ResponsiveContainer>
+            <div className="focused-chart-container" style={{ background: '#0b1221', border: '1px solid #1e293b' }}>
+                {ChartComponent}
             </div>
 
             {/* Outcomes & Profit Calc */}
@@ -180,67 +271,33 @@ const FocusedMarketView = ({ event }) => {
                 {/* UP Outcome */}
                 <div className="focused-outcome-card up">
                     <div className="outcome-header-row">
-                        <div className="outcome-label">
-                            📈 {outcomes[0] || 'UP'}
-                        </div>
-                        <div className="prob-badge" style={{ color: '#10b981' }}>
-                            {(livePrices.up * 100).toFixed(1)}%
-                        </div>
+                        <div className="outcome-label">📈 {outcomes[0] || 'UP'}</div>
+                        <div className="prob-badge" style={{ color: '#10b981' }}>{(livePrices.up * 100).toFixed(1)}%</div>
                     </div>
-
                     <div className="profit-section">
-                        <div className="profit-header">
-                            With <strong>$1.00</strong> investment:
-                        </div>
+                        <div className="profit-header">With <strong>$1.00</strong> investment:</div>
                         <div className="profit-values">
                             <span>Potential Profit:</span>
-                            <span className="profit-amount">
-                                +${calculateProfit(livePrices.up).toFixed(2)}
-                            </span>
+                            <span className="profit-amount">+${calculateProfit(livePrices.up).toFixed(2)}</span>
                         </div>
                     </div>
-
-                    <a
-                        href={`https://polymarket.com/event/${event.slug}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="trade-btn-large"
-                    >
-                        Bet UP
-                    </a>
+                    <a href={`https://polymarket.com/event/${event.slug}`} target="_blank" rel="noreferrer" className="trade-btn-large">Bet UP</a>
                 </div>
 
                 {/* DOWN Outcome */}
                 <div className="focused-outcome-card down">
                     <div className="outcome-header-row">
-                        <div className="outcome-label">
-                            📉 {outcomes[1] || 'DOWN'}
-                        </div>
-                        <div className="prob-badge" style={{ color: '#ef4444' }}>
-                            {(livePrices.down * 100).toFixed(1)}%
-                        </div>
+                        <div className="outcome-label">📉 {outcomes[1] || 'DOWN'}</div>
+                        <div className="prob-badge" style={{ color: '#ef4444' }}>{(livePrices.down * 100).toFixed(1)}%</div>
                     </div>
-
                     <div className="profit-section">
-                        <div className="profit-header">
-                            With <strong>$1.00</strong> investment:
-                        </div>
+                        <div className="profit-header">With <strong>$1.00</strong> investment:</div>
                         <div className="profit-values">
                             <span>Potential Profit:</span>
-                            <span className="profit-amount">
-                                +${calculateProfit(livePrices.down).toFixed(2)}
-                            </span>
+                            <span className="profit-amount">+${calculateProfit(livePrices.down).toFixed(2)}</span>
                         </div>
                     </div>
-
-                    <a
-                        href={`https://polymarket.com/event/${event.slug}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="trade-btn-large"
-                    >
-                        Bet DOWN
-                    </a>
+                    <a href={`https://polymarket.com/event/${event.slug}`} target="_blank" rel="noreferrer" className="trade-btn-large">Bet DOWN</a>
                 </div>
             </div>
         </div>
