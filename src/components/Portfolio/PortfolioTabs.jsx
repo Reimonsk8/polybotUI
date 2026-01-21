@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import './PortfolioTabs.css'
+import { fetchActivityLog as fetchActivityData } from './ActivityLogFetcher'
 
 const PortfolioTabs = ({ userAddress, client }) => {
     const [activeTab, setActiveTab] = useState('active') // 'active', 'closed', 'activity'
