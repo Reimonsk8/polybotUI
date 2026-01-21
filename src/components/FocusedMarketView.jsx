@@ -19,7 +19,9 @@ const FocusedMarketView = ({ event }) => {
     const [currentAssetPrice, setCurrentAssetPrice] = useState(null)
     const [isAssetConnected, setIsAssetConnected] = useState(false)
     const assetWsRef = useRef(null)
-    const [assetError, setAssetError] = useState(null)
+
+    // View State
+    const [chartType, setChartType] = useState('asset') // 'asset' | 'outcome'
 
     // Countdown State
     const [timeLeft, setTimeLeft] = useState('')
@@ -34,6 +36,10 @@ const FocusedMarketView = ({ event }) => {
         else if (t.includes('ethereum') || t.includes('eth')) symbol = 'ethusdt'
         else if (t.includes('solana') || t.includes('sol')) symbol = 'solusdt'
         setAssetSymbol(symbol)
+
+        // Default to asset view if symbol exists, otherwise outcome view
+        if (!symbol) setChartType('outcome')
+        else setChartType('asset')
 
         const desc = event.description || ''
         const title = event.title || ''
@@ -201,8 +207,6 @@ const FocusedMarketView = ({ event }) => {
         ws.onmessage = (e) => {
             try {
                 // RTDS messages might be single objects or arrays?
-                // Doc says: "All messages... follow this structure: { topic... }"
-                // Let's handle both just in case.
                 const raw = JSON.parse(e.data)
                 const messages = Array.isArray(raw) ? raw : [raw]
 
@@ -243,10 +247,12 @@ const FocusedMarketView = ({ event }) => {
         return ((1 / price) - 1)
     }
 
-    const showAssetChart = assetSymbol && currentAssetPrice
+    // Determine which chart to show
+    // Show Asset if: 1) assetSymbol exists AND 2) User selected 'asset'
+    const showAssetChart = assetSymbol && chartType === 'asset'
 
     // Y-Domain
-    const yDomain = showAssetChart && targetPrice
+    const yDomain = showAssetChart && targetPrice && currentAssetPrice
         ? [Math.min(currentAssetPrice, targetPrice) * 0.999, Math.max(currentAssetPrice, targetPrice) * 1.001]
         : ['auto', 'auto']
 
@@ -324,8 +330,11 @@ const FocusedMarketView = ({ event }) => {
                     </div>
                 </div>
 
-                {/* Stat Headers */}
-                {showAssetChart && targetPrice && (
+                {/* Stat Headers - Only show for ASSET chart type if available */}
+                {/* Or always show if asset is available? Usually charts switch but header stats might persist or switch also? */}
+                {/* Let's switch them to be relevant to the view */}
+
+                {showAssetChart && targetPrice && currentAssetPrice && (
                     <div className="price-stats-header" style={{ display: 'flex', gap: '3rem', alignItems: 'center' }}>
                         <div style={{ textAlign: 'right' }}>
                             <div style={{ color: '#94a3b8', fontSize: '0.85rem', fontWeight: '600', textTransform: 'uppercase' }}>Price to Beat</div>
@@ -338,6 +347,20 @@ const FocusedMarketView = ({ event }) => {
                     </div>
                 )}
 
+                {/* If showing Probability Chart, maybe show current Probabilities in the header? */}
+                {!showAssetChart && (
+                    <div className="price-stats-header" style={{ display: 'flex', gap: '3rem', alignItems: 'center' }}>
+                        <div style={{ textAlign: 'right' }}>
+                            <div style={{ color: '#10b981', fontSize: '0.85rem', fontWeight: '600', textTransform: 'uppercase' }}>UP</div>
+                            <div style={{ fontSize: '1.8rem', fontWeight: '700', color: '#10b981', lineHeight: 1 }}>{(livePrices.up * 100).toFixed(1)}%</div>
+                        </div>
+                        <div style={{ textAlign: 'right' }}>
+                            <div style={{ color: '#ef4444', fontSize: '0.85rem', fontWeight: '600', textTransform: 'uppercase' }}>DOWN</div>
+                            <div style={{ fontSize: '1.8rem', fontWeight: '700', color: '#ef4444', lineHeight: 1 }}>{(livePrices.down * 100).toFixed(1)}%</div>
+                        </div>
+                    </div>
+                )}
+
                 <div className="live-indicator">
                     <div className="live-dot" style={{ background: isConnected ? '#10b981' : '#64748b', animation: isConnected ? 'pulse 2s infinite' : 'none' }}></div>
                     {isConnected ? 'LIVE' : '...'}
@@ -345,8 +368,55 @@ const FocusedMarketView = ({ event }) => {
             </div>
 
             {/* Main Chart */}
-            <div className="focused-chart-container" style={{ background: '#0b1221', border: '1px solid #1e293b' }}>
+            <div className="focused-chart-container" style={{ background: '#0b1221', border: '1px solid #1e293b', position: 'relative' }}>
                 {ChartComponent}
+
+                {/* CHART TOGGLES */}
+                {assetSymbol && (
+                    <div className="chart-toggles" style={{
+                        position: 'absolute',
+                        bottom: '20px',
+                        right: '20px',
+                        display: 'flex',
+                        gap: '8px',
+                        zIndex: 10
+                    }}>
+                        <button
+                            className={`toggle-btn ${chartType === 'outcome' ? 'active' : ''}`}
+                            onClick={() => setChartType('outcome')}
+                            style={{
+                                background: chartType === 'outcome' ? '#334155' : 'rgba(15, 23, 42, 0.8)',
+                                border: '1px solid #334155',
+                                borderRadius: '4px',
+                                padding: '6px 12px',
+                                color: chartType === 'outcome' ? '#f8fafc' : '#94a3b8',
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px'
+                            }}
+                        >
+                            <span>📈</span> Probs
+                        </button>
+                        <button
+                            className={`toggle-btn ${chartType === 'asset' ? 'active' : ''}`}
+                            onClick={() => setChartType('asset')}
+                            style={{
+                                background: chartType === 'asset' ? '#334155' : 'rgba(15, 23, 42, 0.8)',
+                                border: '1px solid #334155',
+                                borderRadius: '4px',
+                                padding: '6px 12px',
+                                color: chartType === 'asset' ? '#f8fafc' : '#94a3b8',
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px'
+                            }}
+                        >
+                            <span>₿</span> Price
+                        </button>
+                    </div>
+                )}
             </div>
 
             {/* Outcomes & Profit Calc */}
