@@ -162,74 +162,17 @@ const PortfolioTabs = ({ userAddress, client }) => {
         }
     }
 
-    // Fetch Activity Log using Client (Trades) then enrich
+    // Fetch Activity Log using Data API with fallback to client.getTrades
     const fetchActivityLog = async () => {
         try {
-            // 1. Fetch raw trades from CLOB client (Reliable source)
-            let trades = []
-            if (client) {
-                trades = await client.getTrades({ limit: 50 })
-            } else {
-                // If no client (e.g. view only mode not fully supported for private trades yet without auth), return
-                return
-            }
+            const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
+            const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
 
-            if (!trades || trades.length === 0) {
-                setActivityLog([])
-                return
-            }
-
-            // 2. Extracts unique market IDs to fetch metadata
-            const uniqueMarketIds = [...new Set(trades.map(t => t.market))]
-            const metadataMap = new Map()
-
-            // 3. Enrich with metadata (Sequential to be safe with rate limits, or Promise.all if proxy handles it)
-            // Using a simple batch-like approach or just Promise.all since it's limited to recent 50 trades (likely few unique markets)
-            await Promise.all(uniqueMarketIds.map(async (conditionId) => {
-                try {
-                    const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
-                    const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
-                    const marketUrl = useProxy
-                        ? `${proxyUrl}/api/gamma-api/markets?condition_id=${conditionId}`
-                        : `https://gamma-api.polymarket.com/markets?condition_id=${conditionId}`
-
-                    const res = await fetch(marketUrl)
-                    if (res.ok) {
-                        const json = await res.json()
-                        const marketData = Array.isArray(json) ? json[0] : json
-                        if (marketData) {
-                            metadataMap.set(conditionId, marketData)
-                        }
-                    }
-                } catch (e) {
-                    console.warn("Failed to fetch metadata for", conditionId)
-                }
-            }))
-
-            // 4. Map trades to activity log format
-            const mappedActivity = trades.map(trade => {
-                const marketData = metadataMap.get(trade.market)
-                return {
-                    ...trade,
-                    type: 'TRADE', // Client returns trades
-                    timestamp: trade.match_time || trade.timestamp, // Handle formatting
-                    market: {
-                        image: marketData?.icon || marketData?.image,
-                        question: marketData?.question || trade.outcome || 'Unknown'
-                    },
-                    title: marketData?.question,
-                    outcome: trade.outcome,
-                    // Ensure numeric values
-                    size: parseFloat(trade.size),
-                    price: parseFloat(trade.price)
-                }
-            })
-
-            setActivityLog(mappedActivity)
-
+            const data = await fetchActivityData(userAddress, client, proxyUrl, useProxy)
+            setActivityLog(data)
+            return // Exit early after setting activity log
         } catch (err) {
             console.error("Failed to fetch activity log", err)
-            // Don't clear log on error to prevent flashing
         }
     }
 
