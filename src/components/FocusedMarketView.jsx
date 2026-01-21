@@ -19,6 +19,7 @@ const FocusedMarketView = ({ event }) => {
     const [currentAssetPrice, setCurrentAssetPrice] = useState(null)
     const [isAssetConnected, setIsAssetConnected] = useState(false)
     const assetWsRef = useRef(null)
+    const [assetError, setAssetError] = useState(null)
 
     // View State
     const [chartType, setChartType] = useState('asset') // 'asset' | 'outcome'
@@ -171,71 +172,121 @@ const FocusedMarketView = ({ event }) => {
     }, [market])
 
 
-    // 4. WS 2: ASSET PRICES (RTDS Endpoint)
+    // 4. WS 2: ASSET PRICES (RTDS Endpoint with Binance Fallback)
     useEffect(() => {
         if (!assetSymbol) return
 
-        // RTDS Endpoint provided by user: wss://ws-live-data.polymarket.com
-        const ws = new WebSocket('wss://ws-live-data.polymarket.com')
-        assetWsRef.current = ws
+        let ws = null
+        let pingInterval = null
+        let pollingInterval = null
+        let isFallback = false
 
-        let pingInterval
+        // Fallback: Poll Binance API directly if WS fails
+        const startPolling = () => {
+            if (pollingInterval) return; // Already polling
 
-        ws.onopen = () => {
-            setIsAssetConnected(true)
+            console.log('[Asset Price] Switching to Binance API polling fallback')
+            isFallback = true
 
-            // Subscribe to crypto_prices (Binance source)
-            ws.send(JSON.stringify({
-                action: "subscribe",
-                subscriptions: [
-                    {
-                        topic: "crypto_prices",
-                        type: "update",
-                        filters: assetSymbol // e.g. "btcusdt"
-                    }
-                ]
-            }))
-
-            // Heartbeat / Ping logic (every 5 seconds)
-            pingInterval = setInterval(() => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send("PING")
-                }
-            }, 5000)
-        }
-
-        ws.onmessage = (e) => {
-            try {
-                // RTDS messages might be single objects or arrays?
-                const raw = JSON.parse(e.data)
-                const messages = Array.isArray(raw) ? raw : [raw]
-
-                messages.forEach(msg => {
-                    if (msg.topic === 'crypto_prices' && msg.payload) {
-                        const price = parseFloat(msg.payload.value)
+            const fetchBinance = async () => {
+                try {
+                    // Symbol mapping: btcusdt -> BTCUSDT
+                    const symbol = assetSymbol.toUpperCase()
+                    const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`)
+                    if (res.ok) {
+                        const data = await res.json()
+                        const price = parseFloat(data.price)
                         setCurrentAssetPrice(price)
                         setAssetPriceHistory(h => [...h, {
-                            time: new Date(msg.payload.timestamp || Date.now()).toLocaleTimeString(),
-                            timestamp: msg.payload.timestamp,
+                            time: new Date().toLocaleTimeString(),
+                            timestamp: Date.now(),
                             price: price
                         }].slice(-50))
                     }
-                })
-            } catch (err) { }
+                } catch (err) {
+                    console.warn('[Asset Price] Binance fallback failed', err)
+                }
+            }
+
+            fetchBinance()
+            pollingInterval = setInterval(fetchBinance, 3000) // Poll every 3s
         }
 
-        ws.onclose = () => {
-            setIsAssetConnected(false)
-            clearInterval(pingInterval)
+        // Primary: WebSocket
+        const connect = () => {
+            try {
+                console.log('[RTDS] Connecting to wss://ws-live-data.polymarket.com ...')
+                ws = new WebSocket('wss://ws-live-data.polymarket.com')
+                assetWsRef.current = ws
+
+                ws.onopen = () => {
+                    console.log('[RTDS] Connected!')
+                    setIsAssetConnected(true)
+                    setAssetError(null)
+
+                    setTimeout(() => {
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({
+                                action: "subscribe",
+                                subscriptions: [{ topic: "crypto_prices", type: "update", filters: [assetSymbol] }]
+                            }))
+                            // Redundance just in case
+                            ws.send(JSON.stringify({
+                                action: "subscribe",
+                                subscriptions: [{ topic: "crypto_prices", type: "update", filters: assetSymbol }]
+                            }))
+                        }
+                    }, 500)
+
+                    pingInterval = setInterval(() => {
+                        if (ws.readyState === WebSocket.OPEN) ws.send("PING")
+                    }, 5000)
+                }
+
+                ws.onmessage = (e) => {
+                    // If we receive data, ensure fallback is off? 
+                    // No, if we are here, WS is working.
+                    try {
+                        const raw = JSON.parse(e.data)
+                        const messages = Array.isArray(raw) ? raw : [raw]
+                        messages.forEach(msg => {
+                            if (msg.topic === 'crypto_prices' && msg.payload) {
+                                const price = parseFloat(msg.payload.value)
+                                setCurrentAssetPrice(price)
+                                setAssetPriceHistory(h => [...h, {
+                                    time: new Date(msg.payload.timestamp || Date.now()).toLocaleTimeString(),
+                                    timestamp: msg.payload.timestamp,
+                                    price: price
+                                }].slice(-50))
+                            }
+                        })
+                    } catch (err) { }
+                }
+
+                ws.onclose = (e) => {
+                    console.warn('[RTDS] WS Closed. Starting fallback.', e.code)
+                    setIsAssetConnected(false)
+                    clearInterval(pingInterval)
+                    startPolling()
+                }
+
+                ws.onerror = (err) => {
+                    console.error("[RTDS] Error:", err)
+                    // Don't close here, onclose will trigger
+                }
+
+            } catch (err) {
+                console.error("WS Setup Error", err)
+                startPolling()
+            }
         }
 
-        ws.onerror = (err) => {
-            console.error("RTDS WS Error", err)
-        }
+        connect()
 
         return () => {
-            ws.close()
+            if (ws) ws.close()
             clearInterval(pingInterval)
+            clearInterval(pollingInterval)
         }
 
     }, [assetSymbol])
@@ -248,7 +299,6 @@ const FocusedMarketView = ({ event }) => {
     }
 
     // Determine which chart to show
-    // Show Asset if: 1) assetSymbol exists AND 2) User selected 'asset'
     const showAssetChart = assetSymbol && chartType === 'asset'
 
     // Y-Domain
@@ -330,24 +380,23 @@ const FocusedMarketView = ({ event }) => {
                     </div>
                 </div>
 
-                {/* Stat Headers - Only show for ASSET chart type if available */}
-                {/* Or always show if asset is available? Usually charts switch but header stats might persist or switch also? */}
-                {/* Let's switch them to be relevant to the view */}
+                {/* Stat Headers */}
 
-                {showAssetChart && targetPrice && currentAssetPrice && (
+                {showAssetChart && targetPrice && (
                     <div className="price-stats-header" style={{ display: 'flex', gap: '3rem', alignItems: 'center' }}>
                         <div style={{ textAlign: 'right' }}>
                             <div style={{ color: '#94a3b8', fontSize: '0.85rem', fontWeight: '600', textTransform: 'uppercase' }}>Price to Beat</div>
                             <div style={{ fontSize: '1.8rem', fontWeight: '700', color: '#e2e8f0', lineHeight: 1 }}>${targetPrice.toLocaleString()}</div>
                         </div>
-                        <div style={{ textAlign: 'right' }}>
-                            <div style={{ color: '#f59e0b', fontSize: '0.85rem', fontWeight: '600', textTransform: 'uppercase' }}>Current Price</div>
-                            <div style={{ fontSize: '1.8rem', fontWeight: '700', color: '#f59e0b', lineHeight: 1 }}>${currentAssetPrice.toLocaleString()}</div>
-                        </div>
+                        {currentAssetPrice && (
+                            <div style={{ textAlign: 'right' }}>
+                                <div style={{ color: '#f59e0b', fontSize: '0.85rem', fontWeight: '600', textTransform: 'uppercase' }}>Current Price</div>
+                                <div style={{ fontSize: '1.8rem', fontWeight: '700', color: '#f59e0b', lineHeight: 1 }}>${currentAssetPrice.toLocaleString()}</div>
+                            </div>
+                        )}
                     </div>
                 )}
 
-                {/* If showing Probability Chart, maybe show current Probabilities in the header? */}
                 {!showAssetChart && (
                     <div className="price-stats-header" style={{ display: 'flex', gap: '3rem', alignItems: 'center' }}>
                         <div style={{ textAlign: 'right' }}>
@@ -368,7 +417,13 @@ const FocusedMarketView = ({ event }) => {
             </div>
 
             {/* Main Chart */}
-            <div className="focused-chart-container" style={{ background: '#0b1221', border: '1px solid #1e293b', position: 'relative' }}>
+            <div className="focused-chart-container" style={{
+                background: '#0b1221',
+                border: '1px solid #1e293b',
+                position: 'relative',
+                width: '100%',
+                height: '500px'
+            }}>
                 {ChartComponent}
 
                 {/* CHART TOGGLES */}
