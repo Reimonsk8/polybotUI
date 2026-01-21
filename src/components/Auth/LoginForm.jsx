@@ -90,6 +90,49 @@ const LoginForm = ({ onConnectPrivateKey, onConnectApiKey, onConnectFull, loadin
         reader.readAsText(file)
     }
 
+    // Download current form values as .env file
+    const downloadEnvFile = () => {
+        console.log('[ENV Download] Creating .env file with current values')
+        console.log('[ENV Download] Private Key:', privateKeyInput ? 'SET' : 'EMPTY')
+        console.log('[ENV Download] Proxy Address:', proxyAddressInput || 'EMPTY')
+        console.log('[ENV Download] API Key:', apiKeyInput || 'EMPTY')
+
+        const envContent = `# ============================================
+# Polymarket Portfolio Tracker Configuration  
+# ============================================
+# Generated: ${new Date().toISOString()}
+
+# Proxy Server
+VITE_PROXY_API_URL=http://localhost:3001
+VITE_USE_PROXY=true
+
+# Your Wallet Credentials
+VITE_PRIVATE_KEY=${privateKeyInput}
+
+# Your Polymarket PROXY Wallet Address (IMPORTANT!)
+VITE_PROXY_WALLET_ADDRESS=${proxyAddressInput}
+
+# Polymarket API Credentials (Optional)
+VITE_API_KEY=${apiKeyInput}
+VITE_API_SECRET=${apiSecretInput}
+VITE_API_PASSPHRASE=${apiPassphraseInput}
+`
+
+        // Create blob and download
+        const blob = new Blob([envContent], { type: 'text/plain' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = '.env'
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+
+        console.log('[ENV Download] File downloaded successfully!')
+        alert('✅ .env file downloaded! Use this file to quickly login next time.')
+    }
+
     if (!showEmailLogin) {
         return (
             <div className="portfolio-login">
@@ -252,15 +295,27 @@ const LoginForm = ({ onConnectPrivateKey, onConnectApiKey, onConnectFull, loadin
                     I will preserve the inputs as they are in the screenshot/code, but connectFullCredentials is the main action.
                  */}
 
-                <div className="form-actions" style={{ marginTop: '20px' }}>
+                <div className="form-actions" style={{ marginTop: '20px', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
                     <button onClick={() => setShowEmailLogin(false)} className="cancel-btn">
                         Back
+                    </button>
+                    <button
+                        onClick={downloadEnvFile}
+                        className="connect-button"
+                        style={{
+                            background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                            flex: '1',
+                            fontSize: '0.9rem'
+                        }}
+                        disabled={!privateKeyInput}
+                    >
+                        💾 Save as .env File
                     </button>
                     <button
                         onClick={handleConnectFull}
                         className="submit-btn"
                         disabled={loading}
-                        style={{ background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' }}
+                        style={{ background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', flex: '1' }}
                     >
                         {loading ? "Authenticating..." : "Login"}
                     </button>
