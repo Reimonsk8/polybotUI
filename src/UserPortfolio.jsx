@@ -515,6 +515,8 @@ const UserPortfolio = () => {
                 positionCount={positions.length}
             />
 
+
+            {console.log('[UserPortfolio] Rendering with:', { address, proxyAddress, using: proxyAddress || address })}
             <PortfolioTabs userAddress={proxyAddress || address} client={client} />
         </div>
     )
