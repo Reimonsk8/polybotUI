@@ -88,20 +88,11 @@ const FocusedMarketView = ({ event }) => {
         }
 
         // B. Handle 'book' snapshots (Bids/Asks)
-        // Helper: get best price from bids/asks (mid price or just match)
-        // Polymarket 'price' usually refers to the last trade or mid price.
-        // Let's use the BEST BID as the sell price, or BEST ASK as buy price.
-        // For simplicity, let's look for `last_trade_price` if available, or best bid.
         if (data.event_type === 'book') {
             const assetId = data.asset_id
-
-            // If data has explicit bids array
             if (data.bids && data.bids.length > 0) {
-                // Best bid is usually first? Or parse.
-                // The array is sorted? Usually best bid is highest price.
-                // let's assume sorted descending or check.
+                // Use BEST BID as approximate price
                 const bestBid = data.bids.reduce((max, b) => Math.max(max, parseFloat(b.price)), 0)
-
                 if (assetId === tokenIds[0]) newUp = bestBid
                 else if (assetId === tokenIds[1]) newDown = bestBid
             }
@@ -130,7 +121,7 @@ const FocusedMarketView = ({ event }) => {
         return false
     }
 
-    // 3. WS 1: MARKET OUTCOMES (Book & Diff)
+    // 3. WS 1: MARKET OUTCOMES (CLOB)
     useEffect(() => {
         if (!market) return
 
@@ -174,53 +165,49 @@ const FocusedMarketView = ({ event }) => {
     }, [market])
 
 
-    // 4. WS 2: ASSET PRICES (Try multiple endpoints if needed)
+    // 4. WS 2: ASSET PRICES (RTDS Endpoint)
     useEffect(() => {
         if (!assetSymbol) return
 
-        // NOTE: Trying separate endpoint based on documentation hints
-        // But main doc says crypto_prices is a topic on the main channel?
-        // Let's try `ws/market` first (default) but ensure we catch the 'updates'.
-        // If that fails, the fallback is harder without a proxy.
-        // User provided screenshot implies they connect to `ws-subscriptions-clob`.
-
-        const ws = new WebSocket('wss://ws-subscriptions-clob.polymarket.com/ws/market')
+        // RTDS Endpoint provided by user: wss://ws-live-data.polymarket.com
+        const ws = new WebSocket('wss://ws-live-data.polymarket.com')
         assetWsRef.current = ws
+
+        let pingInterval
 
         ws.onopen = () => {
             setIsAssetConnected(true)
+
+            // Subscribe to crypto_prices (Binance source)
             ws.send(JSON.stringify({
                 action: "subscribe",
                 subscriptions: [
                     {
                         topic: "crypto_prices",
                         type: "update",
-                        filters: [assetSymbol] // Try array again? Or string.
-                        // Filter logic on server might require array of strings for multiple.
+                        filters: assetSymbol // e.g. "btcusdt"
                     }
                 ]
             }))
-            // Redundancy: send string format too
-            ws.send(JSON.stringify({
-                action: "subscribe",
-                subscriptions: [
-                    {
-                        topic: "crypto_prices",
-                        type: "update",
-                        filters: assetSymbol
-                    }
-                ]
-            }))
+
+            // Heartbeat / Ping logic (every 5 seconds)
+            pingInterval = setInterval(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send("PING")
+                }
+            }, 5000)
         }
 
         ws.onmessage = (e) => {
             try {
+                // RTDS messages might be single objects or arrays?
+                // Doc says: "All messages... follow this structure: { topic... }"
+                // Let's handle both just in case.
                 const raw = JSON.parse(e.data)
                 const messages = Array.isArray(raw) ? raw : [raw]
 
                 messages.forEach(msg => {
-                    // Check for Crypto Price Update
-                    if ((msg.topic === 'crypto_prices' || msg.event_type === 'crypto_prices') && msg.payload) {
+                    if (msg.topic === 'crypto_prices' && msg.payload) {
                         const price = parseFloat(msg.payload.value)
                         setCurrentAssetPrice(price)
                         setAssetPriceHistory(h => [...h, {
@@ -233,8 +220,19 @@ const FocusedMarketView = ({ event }) => {
             } catch (err) { }
         }
 
-        ws.onclose = () => setIsAssetConnected(false)
-        return () => ws.close()
+        ws.onclose = () => {
+            setIsAssetConnected(false)
+            clearInterval(pingInterval)
+        }
+
+        ws.onerror = (err) => {
+            console.error("RTDS WS Error", err)
+        }
+
+        return () => {
+            ws.close()
+            clearInterval(pingInterval)
+        }
 
     }, [assetSymbol])
 
