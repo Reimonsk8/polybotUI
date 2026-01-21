@@ -10,7 +10,12 @@ import PortfolioTabs from './components/Portfolio/PortfolioTabs'
 
 const UserPortfolio = () => {
     const [address, setAddress] = useState(null)
-    const [proxyAddress, setProxyAddress] = useState(null) // Proxy wallet for trading activity
+    const [proxyAddress, setProxyAddress] = useState(() => {
+        // Initialize from localStorage on first load
+        const saved = localStorage.getItem('polymarket_proxy_address')
+        console.log('[UserPortfolio] Restoring proxy address from localStorage:', saved)
+        return saved
+    })
     const [username, setUsername] = useState(null)
     const [profileImage, setProfileImage] = useState(null)
     const [cashBalance, setCashBalance] = useState(null)
@@ -23,6 +28,7 @@ const UserPortfolio = () => {
 
     // Session management constants
     const SESSION_KEY = 'polymarket_session'
+    const PROXY_ADDRESS_KEY = 'polymarket_proxy_address'
     const INACTIVITY_TIMEOUT = 30 * 60 * 1000 // 30 minutes in milliseconds
 
     // Restore session on mount
@@ -131,16 +137,20 @@ const UserPortfolio = () => {
     const performL2Login = async (signer, userAddress, authType, proxyAddressOverride = null) => {
         try {
             // 1. Get Proxy Address - Priority order:
-            // a) Environment variable VITE_PROXY_WALLET_ADDRESS (HIGHEST PRIORITY - set in .env)
-            // b) Override passed in as parameter
-            // c) API detection from positions/activity
-            // d) Fallback to user address
+            // a) LocalStorage (saved from previous session - HIGHEST PRIORITY)
+            // b) Environment variable VITE_PROXY_WALLET_ADDRESS (from .env)
+            // c) Override passed in as parameter
+            // d) API detection from positions/activity
+            // e) Fallback to user address
 
-            // Start with env variable if available
-            let proxyAddress = import.meta.env.VITE_PROXY_WALLET_ADDRESS || proxyAddressOverride
+            // Start with localStorage, then env, then override
+            let proxyAddress = localStorage.getItem('polymarket_proxy_address')
+                || import.meta.env.VITE_PROXY_WALLET_ADDRESS
+                || proxyAddressOverride
             let name = null
             let image = null
 
+            console.log('[L2 Login] Checking proxy address from localStorage:', localStorage.getItem('polymarket_proxy_address'))
             console.log('[L2 Login] Checking proxy address from env:', import.meta.env.VITE_PROXY_WALLET_ADDRESS)
             console.log('[L2 Login] Starting with proxy address:', proxyAddress || 'will detect')
 
@@ -226,7 +236,12 @@ const UserPortfolio = () => {
             )
 
             setClient(l2Client)
-            setProxyAddress(proxyAddress) // Store proxy address for API calls
+
+            // Store proxy address both in state AND localStorage for persistence
+            setProxyAddress(proxyAddress)
+            localStorage.setItem('polymarket_proxy_address', proxyAddress)
+            console.log('[L2 Login] Saved proxy address to localStorage:', proxyAddress)
+
             setIsL2Authenticated(true)
 
             // 6. Fetch Balance
@@ -472,9 +487,11 @@ const UserPortfolio = () => {
     const disconnect = () => {
         // Clear session from localStorage
         localStorage.removeItem(SESSION_KEY)
+        localStorage.removeItem(PROXY_ADDRESS_KEY) // Clear persisted proxy address
 
         // Clear state
         setAddress(null)
+        setProxyAddress(null)
         setUsername(null)
         setProfileImage(null)
         setPositions([])
