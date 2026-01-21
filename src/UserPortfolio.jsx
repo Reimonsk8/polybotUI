@@ -135,7 +135,7 @@ const UserPortfolio = () => {
             // b) Environment variable (most reliable if user has set it)
             // c) API detection (may not work if APIs need proxy address)
             // d) Fallback to user address
-            let proxyAddress = proxyAddressOverride || import.meta.env.VITE_PROXY_ADDRESS
+            let proxyAddress = proxyAddressOverride || import.meta.env.PROXY_WALLET_ADDRESS
             let name = null
             let image = null
 
@@ -246,8 +246,8 @@ const UserPortfolio = () => {
             // Try Gamma API (via Proxy if available, otherwise direct)
             try {
                 // Use proxy if VITE_PROXY_API_URL is set, otherwise try direct (will fail on GitHub Pages due to CORS)
-                const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
-                const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
+                const proxyUrl = import.meta.env.PROXY_API_URL || 'http://localhost:3001'
+                const useProxy = import.meta.env.USE_PROXY !== 'false'
 
                 const profileUrl = useProxy
                     ? `${proxyUrl}/gamma-api/public-profile?address=${userAddress}`
