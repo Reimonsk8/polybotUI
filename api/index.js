@@ -11,8 +11,15 @@ app.set('trust proxy', 1);
 // Enable CORS for all routes with explicit options
 app.use(cors({
     origin: '*', // Allow all origins
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+        'Content-Type',
+        'Authorization',
+        'POLY-ADDRESS',
+        'POLY-TIMESTAMP',
+        'POLY-NONCE',
+        'POLY-SIGNATURE'
+    ]
 }));
 // Enable CORS pre-flight
 app.options('*', cors());
