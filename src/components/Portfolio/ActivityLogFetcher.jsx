@@ -7,6 +7,7 @@ export const fetchActivityLog = async (userAddress, client, proxyUrl, useProxy) 
         }
 
         console.log('[Activity Log] Starting fetch for user:', userAddress)
+        console.log('[Activity Log] User address (should be proxy wallet):', userAddress)
 
         // Try to get authentication headers from client if available
         let authHeaders = {}
