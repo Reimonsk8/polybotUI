@@ -59,7 +59,7 @@ const LoginForm = ({ onConnectPrivateKey, onConnectApiKey, onConnectFull, loadin
                     case 'VITE_PRIVATE_KEY':
                         setPrivateKeyInput(value)
                         break
-                    case 'VITE_PROXY_ADDRESS':
+                    case 'VITE_PROXY_WALLET_ADDRESS':
                         setProxyAddressInput(value)
                         break
                     case 'VITE_API_KEY':
