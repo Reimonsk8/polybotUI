@@ -67,8 +67,8 @@ const PortfolioTabs = ({ userAddress, client }) => {
             const enrichedPositions = []
             for (const position of activePositions) {
                 try {
-                    const proxyUrl = import.meta.env.PROXY_API_URL || 'http://localhost:3001'
-                    const useProxy = import.meta.env.USE_PROXY !== 'false'
+                    const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
+                    const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
 
                     const marketUrl = useProxy
                         ? `${proxyUrl}/api/gamma-api/markets?condition_id=${position.conditionId}`
@@ -165,8 +165,8 @@ const PortfolioTabs = ({ userAddress, client }) => {
     // Fetch Activity Log using Data API with fallback to client.getTrades
     const fetchActivityLog = async () => {
         try {
-            const proxyUrl = import.meta.env.PROXY_API_URL || 'http://localhost:3001'
-            const useProxy = import.meta.env.USE_PROXY !== 'false'
+            const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
+            const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
 
             const data = await fetchActivityData(userAddress, client, proxyUrl, useProxy)
             setActivityLog(data)

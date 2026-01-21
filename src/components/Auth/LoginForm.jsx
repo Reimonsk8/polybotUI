@@ -30,12 +30,12 @@ const LoginForm = ({ onConnectPrivateKey, onConnectApiKey, onConnectFull, loadin
 
     // "Load from .env" helper
     const loadFromEnv = () => {
-        if (import.meta.env.PRIVATE_KEY) setPrivateKeyInput(import.meta.env.PRIVATE_KEY)
-        if (import.meta.env.PROXY_WALLET_ADDRESS) setProxyAddressInput(import.meta.env.PROXY_WALLET_ADDRESS)
-        if (import.meta.env.API_KEY) setApiKeyInput(import.meta.env.API_KEY)
-        if (import.meta.env.API_SECRET) setApiSecretInput(import.meta.env.API_SECRET)
-        if (import.meta.env.API_PASSPHRASE) setApiPassphraseInput(import.meta.env.API_PASSPHRASE)
-        if (import.meta.env.WALLET_ADDRESS) setApiAddressInput(import.meta.env.WALLET_ADDRESS)
+        if (import.meta.env.VITE_PRIVATE_KEY) setPrivateKeyInput(import.meta.env.VITE_PRIVATE_KEY)
+        if (import.meta.env.VITE_PROXY_WALLET_ADDRESS) setProxyAddressInput(import.meta.env.VITE_PROXY_WALLET_ADDRESS)
+        if (import.meta.env.VITE_API_KEY) setApiKeyInput(import.meta.env.VITE_API_KEY)
+        if (import.meta.env.VITE_API_SECRET) setApiSecretInput(import.meta.env.VITE_API_SECRET)
+        if (import.meta.env.VITE_API_PASSPHRASE) setApiPassphraseInput(import.meta.env.VITE_API_PASSPHRASE)
+        if (import.meta.env.VITE_WALLET_ADDRESS) setApiAddressInput(import.meta.env.VITE_WALLET_ADDRESS)
     }
 
     // Handle custom .env file upload
@@ -116,7 +116,7 @@ const LoginForm = ({ onConnectPrivateKey, onConnectApiKey, onConnectFull, loadin
 
                 {/* Load from .env or Upload custom .env */}
                 <div style={{ marginBottom: '15px' }}>
-                    {(import.meta.env.PRIVATE_KEY || import.meta.env.API_KEY) ? (
+                    {(import.meta.env.VITE_PRIVATE_KEY || import.meta.env.VITE_API_KEY) ? (
                         <button
                             onClick={loadFromEnv}
                             className="connect-button"
