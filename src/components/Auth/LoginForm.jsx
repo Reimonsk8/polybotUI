@@ -48,6 +48,8 @@ const LoginForm = ({ onConnectPrivateKey, onConnectApiKey, onConnectFull, loadin
             const content = e.target.result
             const lines = content.split('\n')
 
+            console.log('[ENV Upload] Processing', lines.length, 'lines')
+
             lines.forEach(line => {
                 const trimmed = line.trim()
                 if (!trimmed || trimmed.startsWith('#')) return // Skip empty lines and comments
@@ -55,24 +57,32 @@ const LoginForm = ({ onConnectPrivateKey, onConnectApiKey, onConnectFull, loadin
                 const [key, ...valueParts] = trimmed.split('=')
                 const value = valueParts.join('=').trim().replace(/^["']|["']$/g, '') // Remove quotes
 
+                console.log('[ENV Upload] Found:', key.trim(), '=', value.slice(0, 20) + '...')
+
                 switch (key.trim()) {
                     case 'VITE_PRIVATE_KEY':
                         setPrivateKeyInput(value)
+                        console.log('[ENV Upload] Set private key')
                         break
                     case 'VITE_PROXY_WALLET_ADDRESS':
                         setProxyAddressInput(value)
+                        console.log('[ENV Upload] Set proxy wallet address:', value)
                         break
                     case 'VITE_API_KEY':
                         setApiKeyInput(value)
+                        console.log('[ENV Upload] Set API key')
                         break
                     case 'VITE_API_SECRET':
                         setApiSecretInput(value)
+                        console.log('[ENV Upload] Set API secret')
                         break
                     case 'VITE_API_PASSPHRASE':
                         setApiPassphraseInput(value)
+                        console.log('[ENV Upload] Set API passphrase')
                         break
                     case 'VITE_ADDRESS':
                         setApiAddressInput(value)
+                        console.log('[ENV Upload] Set wallet address')
                         break
                 }
             })
