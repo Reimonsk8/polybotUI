@@ -10,6 +10,7 @@ import PortfolioTabs from './components/Portfolio/PortfolioTabs'
 
 const UserPortfolio = () => {
     const [address, setAddress] = useState(null)
+    const [proxyAddress, setProxyAddress] = useState(null) // Proxy wallet for trading activity
     const [username, setUsername] = useState(null)
     const [profileImage, setProfileImage] = useState(null)
     const [cashBalance, setCashBalance] = useState(null)
@@ -209,6 +210,7 @@ const UserPortfolio = () => {
             )
 
             setClient(l2Client)
+            setProxyAddress(proxyAddress) // Store proxy address for API calls
             setIsL2Authenticated(true)
 
             // 6. Fetch Balance
@@ -495,7 +497,7 @@ const UserPortfolio = () => {
                 positionCount={positions.length}
             />
 
-            <PortfolioTabs userAddress={address} client={client} />
+            <PortfolioTabs userAddress={proxyAddress || address} client={client} />
         </div>
     )
 }
