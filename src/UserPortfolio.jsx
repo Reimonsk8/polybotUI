@@ -8,7 +8,7 @@ import PortfolioStats from './components/Portfolio/PortfolioStats'
 import PositionsTable from './components/Portfolio/PositionsTable'
 import PortfolioTabs from './components/Portfolio/PortfolioTabs'
 
-const UserPortfolio = () => {
+const UserPortfolio = ({ onStateChange }) => {
     const [address, setAddress] = useState(null)
     const [proxyAddress, setProxyAddress] = useState(() => {
         // Initialize from localStorage on first load
@@ -135,6 +135,17 @@ const UserPortfolio = () => {
             })
         }
     }, [address, username, profileImage, cashBalance, loginMethod, isL2Authenticated, positions, portfolioValue])
+
+    // Propagate State to Parent (App.jsx) for Trading Views
+    useEffect(() => {
+        if (onStateChange) {
+            onStateChange({
+                client,
+                address: proxyAddress || address, // Use proxy if available (L2), else L1
+                isConnected: !!address
+            })
+        }
+    }, [client, address, proxyAddress, onStateChange])
 
     const fetchPortfolioValue = async (userAddress) => {
         try {

@@ -15,6 +15,7 @@ function App() {
   const [expandedMarketId, setExpandedMarketId] = useState(null) // For inline mini chart
   const [modalMarket, setModalMarket] = useState(null) // For full modal
   const [selectedEventId, setSelectedEventId] = useState(null) // Focus mode state
+  const [userState, setUserState] = useState({ client: null, address: null, isConnected: false })
 
   const fetchMarkets = async () => {
     setLoading(true)
@@ -116,7 +117,7 @@ function App() {
   return (
     <div className="app">
       <div className="container">
-        <UserPortfolio />
+        <UserPortfolio onStateChange={setUserState} />
 
         {/* Controls Section */}
         {markets.length > 0 && (
@@ -211,7 +212,13 @@ function App() {
               <div style={{ width: '100%', display: 'flex', justifyContent: 'center', padding: '2rem 0' }}>
                 {(() => {
                   const event = markets.find(e => String(e.id) === String(selectedEventId))
-                  return event ? <FocusedMarketView event={event} /> : null
+                  return event ? (
+                    <FocusedMarketView
+                      event={event}
+                      client={userState.client}
+                      userAddress={userState.address}
+                    />
+                  ) : null
                 })()}
               </div>
             ) : (

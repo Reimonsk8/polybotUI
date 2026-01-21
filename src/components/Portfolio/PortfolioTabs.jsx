@@ -140,7 +140,7 @@ const PortfolioTabs = ({ userAddress, client }) => {
                             price: 0.005, // Basically Market Sell
                             side: 'SELL',
                             size: bet.size,
-                            feeRateBps: 0,
+                            feeRateBps: 1000,
                             nonce: Date.now()
                         })
 

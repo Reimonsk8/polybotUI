@@ -2,15 +2,24 @@ import { useState, useEffect, useRef } from 'react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceLine } from 'recharts'
 import './FocusedMarketView.css'
 
-const FocusedMarketView = ({ event }) => {
+const FocusedMarketView = ({ event, client, userAddress }) => {
     const market = event.markets?.[0]
     const outcomes = JSON.parse(market?.outcomes || '[]')
 
     // Outcome Pricing State
+    // Outcome Pricing State
     const [priceHistory, setPriceHistory] = useState([])
-    const [livePrices, setLivePrices] = useState({ up: 0, down: 0 })
+    // Structure: { bid: 0, ask: 0, last: 0 }
+    const [livePrices, setLivePrices] = useState({
+        up: { bid: 0, ask: 0, last: 0 },
+        down: { bid: 0, ask: 0, last: 0 }
+    })
     const [isConnected, setIsConnected] = useState(false)
     const wsRef = useRef(null)
+
+    // Trading State
+    const [ordering, setOrdering] = useState(false)
+    const [orderStatus, setOrderStatus] = useState(null)
 
     // Asset Pricing State
     const [assetSymbol, setAssetSymbol] = useState(null)
@@ -49,7 +58,7 @@ const FocusedMarketView = ({ event }) => {
         if (match) {
             setTargetPrice(parseFloat(match[1].replace(/,/g, '')))
         }
-    }, [event])
+    }, [event?.id])
 
     // 2. COUNTDOWN TIMER
     useEffect(() => {
@@ -76,100 +85,96 @@ const FocusedMarketView = ({ event }) => {
     }, [event?.endDate])
 
 
-    // HELPER: Process generic Outcome Updates (Price Change & Book)
-    const processOutcomeMessage = (data, tokenIds) => {
-        if (!data) return false
+    // 3. WS LOGIC (Refined for Bids/Asks)
+    const processOutcomeMessage = (data, tIds) => {
+        if (!data) return
+        const upId = tIds[0]
+        const downId = tIds[1]
+        let updates = {} // { up: {}, down: {} }
 
-        let newUp = null
-        let newDown = null
-        let changed = false
+        const addUpdate = (type, field, val) => {
+            if (!updates[type]) updates[type] = {}
+            updates[type][field] = parseFloat(val)
+        }
 
-        // A. Handle 'price_change' or 'diff'
+        // Price Changes (Last Trade)
         const changes = data.price_changes || data.changes
         if ((data.event_type === 'price_change' || data.event_type === 'diff') && changes) {
-            changes.forEach(change => {
-                const price = parseFloat(change.price)
-                if (change.asset_id === tokenIds[0]) newUp = price
-                else if (change.asset_id === tokenIds[1]) newDown = price
+            changes.forEach(c => {
+                if (c.asset_id === upId) addUpdate('up', 'last', c.price)
+                if (c.asset_id === downId) addUpdate('down', 'last', c.price)
             })
         }
 
-        // B. Handle 'book' snapshots (Bids/Asks)
+        // Orderbook Snapshots (Bids/Asks)
         if (data.event_type === 'book') {
-            const assetId = data.asset_id
-            if (data.bids && data.bids.length > 0) {
-                // Use BEST BID as approximate price
-                const bestBid = data.bids.reduce((max, b) => Math.max(max, parseFloat(b.price)), 0)
-                if (assetId === tokenIds[0]) newUp = bestBid
-                else if (assetId === tokenIds[1]) newDown = bestBid
+            const type = data.asset_id === upId ? 'up' : (data.asset_id === downId ? 'down' : null)
+            if (type) {
+                if (data.bids?.length > 0) {
+                    const bestBid = data.bids.reduce((max, b) => Math.max(max, parseFloat(b.price)), 0)
+                    addUpdate(type, 'bid', bestBid)
+                }
+                if (data.asks?.length > 0) {
+                    const bestAsk = data.asks.reduce((min, a) => Math.min(min, parseFloat(a.price)), 1)
+                    addUpdate(type, 'ask', bestAsk)
+                }
             }
         }
 
-        // Apply changes
-        if (newUp !== null || newDown !== null) {
+        if (Object.keys(updates).length > 0) {
             setLivePrices(prev => {
-                const updatedUp = newUp !== null ? newUp : prev.up
-                const updatedDown = newDown !== null ? newDown : prev.down
+                const next = { ...prev }
+                if (updates.up) next.up = { ...next.up, ...updates.up }
+                if (updates.down) next.down = { ...next.down, ...updates.down }
 
-                if (updatedUp !== prev.up || updatedDown !== prev.down) {
-                    changed = true
-                    setPriceHistory(h => [...h, {
-                        time: new Date().toLocaleTimeString(),
-                        timestamp: Date.now(),
-                        upPrice: updatedUp,
-                        downPrice: updatedDown
-                    }].slice(-50))
-                    return { up: updatedUp, down: updatedDown }
+                // Update Chart History if prices changed
+                const uLast = next.up.last || prev.up.last
+                const dLast = next.down.last || prev.down.last
+
+                // Only update history if LAST price changed or it's empty
+                if (updates.up?.last || updates.down?.last) {
+                    setPriceHistory(h => [...h, { time: new Date().toLocaleTimeString(), timestamp: Date.now(), upPrice: uLast, downPrice: dLast }].slice(-50))
                 }
-                return prev
+                return next
             })
-            return true
         }
-        return false
     }
 
-    // 3. WS 1: MARKET OUTCOMES (CLOB)
+    // Connect Market WS
     useEffect(() => {
         if (!market) return
-
         const tokenIds = JSON.parse(market.clobTokenIds || '[]')
-        const currentPrices = JSON.parse(market.outcomePrices || '[]')
-
-        const initialUp = parseFloat(currentPrices[0] || 0)
-        const initialDown = parseFloat(currentPrices[1] || 0)
-        setLivePrices({ up: initialUp, down: initialDown })
-
-        setPriceHistory([{
-            time: new Date().toLocaleTimeString(),
-            timestamp: Date.now(),
-            upPrice: initialUp,
-            downPrice: initialDown
-        }])
-
         if (tokenIds.length === 0) return
+
+        const iPrice = JSON.parse(market.outcomePrices || '[]')
+        const p0 = parseFloat(iPrice[0] || 0)
+        const p1 = parseFloat(iPrice[1] || 0)
+
+        setLivePrices({
+            up: { bid: p0, ask: p0, last: p0 },
+            down: { bid: p1, ask: p1, last: p1 }
+        })
+        setPriceHistory([{ time: new Date().toLocaleTimeString(), timestamp: Date.now(), upPrice: p0, downPrice: p1 }])
 
         const ws = new WebSocket('wss://ws-subscriptions-clob.polymarket.com/ws/market')
         wsRef.current = ws
 
         ws.onopen = () => {
             setIsConnected(true)
-            ws.send(JSON.stringify({
-                assets_ids: tokenIds,
-                type: 'market'
-            }))
+            ws.send(JSON.stringify({ assets_ids: tokenIds, type: 'market' }))
         }
 
         ws.onmessage = (e) => {
             try {
                 const raw = JSON.parse(e.data)
-                const messages = Array.isArray(raw) ? raw : [raw]
-                messages.forEach(msg => processOutcomeMessage(msg, tokenIds))
-            } catch (err) { }
+                const msgs = Array.isArray(raw) ? raw : [raw]
+                msgs.forEach(m => processOutcomeMessage(m, tokenIds))
+            } catch (e) { }
         }
 
         ws.onclose = () => setIsConnected(false)
         return () => ws.close()
-    }, [market])
+    }, [market?.conditionId])
 
 
     // 4. WS 2: ASSET PRICES (RTDS Endpoint with Binance Fallback)
@@ -329,6 +334,70 @@ const FocusedMarketView = ({ event }) => {
         return ((1 / price) - 1)
     }
 
+    // 4. TRADING LOGIC (UPDATED: Fetch Best Ask)
+    const handleBuy = async (outcomeIndex, amountUSD) => {
+        if (!client) {
+            alert("Please Login (L2) to trade.")
+            return
+        }
+
+        const tokenIds = JSON.parse(market.clobTokenIds || '[]')
+        const tokenId = tokenIds[outcomeIndex]
+        const currentPriceObj = outcomeIndex === 0 ? livePrices.up : livePrices.down
+        // Use LAST price for initial estimation if Ask not available, but prefer Ask
+        const estimatedPrice = currentPriceObj.ask || currentPriceObj.last
+
+        if (!estimatedPrice || estimatedPrice <= 0) {
+            alert("Waiting for price data...")
+            return
+        }
+
+        const outcomeName = outcomes[outcomeIndex]
+        setOrdering(true)
+        setOrderStatus(null)
+
+        try {
+            console.log(`[Trade] Fetching Best Ask for ${outcomeName}...`)
+
+            // Fetch Best BUY Price (Ask)
+            // If we have livePrices.up.ask from WS, we can use it, but fetching fresh is safer.
+            let bestAsk = currentPriceObj.ask
+            try {
+                const priceData = await client.getPrice(tokenId, 'BUY')
+                if (priceData && priceData.price) bestAsk = parseFloat(priceData.price)
+            } catch (e) { console.warn("Could not fetch fresh price, using stream", e) }
+
+            if (!bestAsk || bestAsk <= 0) throw new Error("No liquidity/Ask price found.")
+
+            console.log(`[Trade] Best Ask: ${bestAsk}. Buying $${amountUSD}...`)
+
+            // Calculate Size
+            const shares = amountUSD / bestAsk
+
+            // Place Limit Order at Ask Price
+            const order = await client.createOrder({
+                tokenID: tokenId,
+                price: bestAsk,
+                side: 'BUY',
+                size: shares,
+                size: shares,
+                feeRateBps: 1000, // Explicit requirement from error message (0 failed)
+                nonce: Date.now()
+            })
+
+            console.log("Order Placed:", order)
+            setOrderStatus({ type: 'success', msg: `Bought $${amountUSD} of ${outcomeName} @ ${bestAsk.toFixed(3)}!` })
+            setTimeout(() => setOrderStatus(null), 3000)
+
+        } catch (err) {
+            console.error("Trade Failed:", err)
+            setOrderStatus({ type: 'error', msg: err.message || "Trade Failed" })
+            setTimeout(() => setOrderStatus(null), 5000)
+        } finally {
+            setOrdering(false)
+        }
+    }
+
     // Determine which chart to show
     const showAssetChart = assetSymbol && chartType === 'asset'
 
@@ -466,120 +535,155 @@ const FocusedMarketView = ({ event }) => {
                     </div>
                 )}
 
-                {/* Fallback for Probs view */}
-                {!showAssetChart && (
-                    <div className="price-stats-header" style={{ display: 'flex', gap: '3rem', alignItems: 'center' }}>
-                        <div style={{ textAlign: 'right' }}>
-                            <div style={{ color: '#10b981', fontSize: '0.85rem', fontWeight: '600', textTransform: 'uppercase' }}>UP</div>
-                            <div style={{ fontSize: '1.8rem', fontWeight: '700', color: '#10b981', lineHeight: 1 }}>{(livePrices.up * 100).toFixed(1)}%</div>
-                        </div>
-                        <div style={{ textAlign: 'right' }}>
-                            <div style={{ color: '#ef4444', fontSize: '0.85rem', fontWeight: '600', textTransform: 'uppercase' }}>DOWN</div>
-                            <div style={{ fontSize: '1.8rem', fontWeight: '700', color: '#ef4444', lineHeight: 1 }}>{(livePrices.down * 100).toFixed(1)}%</div>
-                        </div>
-                    </div>
-                )}
+                {/* Stats removed from here as they are in cards */}
 
-                <div className="live-indicator">
-                    <div className="live-dot" style={{ background: isConnected || isAssetConnected ? '#10b981' : '#64748b', animation: (isConnected || isAssetConnected) ? 'pulse 2s infinite' : 'none' }}></div>
-                    {(isConnected || isAssetConnected) ? 'LIVE' : '...'}
-                </div>
-            </div>
-
-            {/* Main Chart */}
-            <div className="focused-chart-container" style={{
-                background: '#0b1221',
-                border: '1px solid #1e293b',
-                position: 'relative',
-                width: '100%',
-                height: '500px',
-                borderRadius: '12px',
-                overflow: 'hidden'
-            }}>
-                {ChartComponent}
-
-                {/* CHART TOGGLES */}
-                {assetSymbol && (
-                    <div className="chart-toggles" style={{
-                        position: 'absolute',
-                        bottom: '20px',
-                        right: '20px',
-                        display: 'flex',
-                        gap: '8px',
-                        zIndex: 10
+                {/* Status Message */}
+                {orderStatus && (
+                    <div style={{
+                        position: 'fixed', top: '20px', left: '50%', transform: 'translateX(-50%)',
+                        background: orderStatus.type === 'success' ? '#10b981' : '#ef4444',
+                        color: 'white', padding: '12px 24px', borderRadius: '8px', zIndex: 1000, fontWeight: '600',
+                        boxShadow: '0 10px 30px rgba(0,0,0,0.5)'
                     }}>
-                        <button
-                            className={`toggle-btn ${chartType === 'outcome' ? 'active' : ''}`}
-                            onClick={() => setChartType('outcome')}
-                            style={{
-                                background: chartType === 'outcome' ? '#334155' : 'rgba(15, 23, 42, 0.8)',
-                                border: '1px solid #334155',
-                                borderRadius: '4px',
-                                padding: '6px 12px',
-                                color: chartType === 'outcome' ? '#f8fafc' : '#94a3b8',
-                                cursor: 'pointer',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '6px',
-                                fontSize: '0.85rem',
-                                fontWeight: '500'
-                            }}
-                        >
-                            <span>📈</span> Probs
-                        </button>
-                        <button
-                            className={`toggle-btn ${chartType === 'asset' ? 'active' : ''}`}
-                            onClick={() => setChartType('asset')}
-                            style={{
-                                background: chartType === 'asset' ? '#334155' : 'rgba(15, 23, 42, 0.8)',
-                                border: '1px solid #334155',
-                                borderRadius: '4px',
-                                padding: '6px 12px',
-                                color: chartType === 'asset' ? '#f8fafc' : '#94a3b8',
-                                cursor: 'pointer',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '6px',
-                                fontSize: '0.85rem',
-                                fontWeight: '500'
-                            }}
-                        >
-                            <span>₿</span> Price
-                        </button>
+                        {orderStatus.msg}
                     </div>
                 )}
+
+                <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+                    {/* CHART TOGGLES (Moved here) */}
+                    {assetSymbol && (
+                        <div className="chart-toggles" style={{ display: 'flex', gap: '8px' }}>
+                            <button
+                                className={`toggle-btn ${chartType === 'outcome' ? 'active' : ''}`}
+                                onClick={() => setChartType('outcome')}
+                                style={{
+                                    background: chartType === 'outcome' ? '#334155' : 'rgba(15, 23, 42, 0.8)',
+                                    border: '1px solid #334155',
+                                    borderRadius: '4px',
+                                    padding: '6px 12px',
+                                    color: chartType === 'outcome' ? '#f8fafc' : '#94a3b8',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '6px',
+                                    fontSize: '0.85rem',
+                                    fontWeight: '500'
+                                }}
+                            >
+                                <span>📈</span> Probs
+                            </button>
+                            <button
+                                className={`toggle-btn ${chartType === 'asset' ? 'active' : ''}`}
+                                onClick={() => setChartType('asset')}
+                                style={{
+                                    background: chartType === 'asset' ? '#334155' : 'rgba(15, 23, 42, 0.8)',
+                                    border: '1px solid #334155',
+                                    borderRadius: '4px',
+                                    padding: '6px 12px',
+                                    color: chartType === 'asset' ? '#f8fafc' : '#94a3b8',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '6px',
+                                    fontSize: '0.85rem',
+                                    fontWeight: '500'
+                                }}
+                            >
+                                <span>₿</span> Price
+                            </button>
+                        </div>
+                    )}
+
+                    <div className="live-indicator">
+                        <div className="live-dot" style={{ background: isConnected || isAssetConnected ? '#10b981' : '#64748b', animation: (isConnected || isAssetConnected) ? 'pulse 2s infinite' : 'none' }}></div>
+                        {(isConnected || isAssetConnected) ? 'LIVE' : '...'}
+                    </div>
+                </div>
             </div>
 
-            {/* Outcomes & Profit Calc */}
-            <div className="focused-outcomes">
-                <div className="focused-outcome-card up">
-                    <div className="outcome-header-row">
-                        <div className="outcome-label">📈 {outcomes[0] || 'UP'}</div>
-                        <div className="prob-badge" style={{ color: '#10b981' }}>{(livePrices.up * 100).toFixed(1)}%</div>
+            {/* Main Content Grid */}
+            <div className="focused-main-layout">
+                {/* Chart Column */}
+                <div className="chart-column">
+                    <div className="focused-chart-container" style={{
+                        background: '#0b1221',
+                        border: '1px solid #1e293b',
+                        position: 'relative',
+                        width: '100%',
+                        height: '100%', // Fill the column
+                        minHeight: '350px', // REDUCED HEIGHT
+                        borderRadius: '12px',
+                        overflow: 'hidden'
+                    }}>
+                        {ChartComponent}
                     </div>
-                    <div className="profit-section">
-                        <div className="profit-header">With <strong>$1.00</strong> investment:</div>
-                        <div className="profit-values">
-                            <span>Potential Profit:</span>
-                            <span className="profit-amount">+${calculateProfit(livePrices.up).toFixed(2)}</span>
-                        </div>
-                    </div>
-                    <a href={`https://polymarket.com/event/${event.slug}`} target="_blank" rel="noreferrer" className="trade-btn-large">Bet UP</a>
                 </div>
 
-                <div className="focused-outcome-card down">
-                    <div className="outcome-header-row">
-                        <div className="outcome-label">📉 {outcomes[1] || 'DOWN'}</div>
-                        <div className="prob-badge" style={{ color: '#ef4444' }}>{(livePrices.down * 100).toFixed(1)}%</div>
-                    </div>
-                    <div className="profit-section">
-                        <div className="profit-header">With <strong>$1.00</strong> investment:</div>
-                        <div className="profit-values">
-                            <span>Potential Profit:</span>
-                            <span className="profit-amount">+${calculateProfit(livePrices.down).toFixed(2)}</span>
+                {/* Outcomes Column (Vertical Stack) */}
+                <div className="focused-outcomes">
+                    {/* UP CARD */}
+                    <div className="focused-outcome-card up">
+                        <div className="outcome-header-row">
+                            <div className="outcome-label">📈 {outcomes[0] || 'UP'}</div>
+                            <div className="prob-badge" style={{ color: '#10b981' }}>{(livePrices.up.last * 100).toFixed(1)}%</div>
                         </div>
+                        {/* SPREAD INFO */}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#94a3b8', margin: '4px 0' }}>
+                            <span>Bid: <strong style={{ color: '#cbd5e1' }}>{livePrices.up.bid || '-'}</strong></span>
+                            <span>Ask: <strong style={{ color: '#f59e0b' }}>{livePrices.up.ask || '-'}</strong></span>
+                        </div>
+
+                        <div className="profit-grid">
+                            <div className="p-item">
+                                <div className="p-label">Price</div>
+                                <div className="p-val">${livePrices.up.last.toFixed(3)}</div>
+                            </div>
+                            <div className="p-item border-left">
+                                <div className="p-label">Return</div>
+                                <div className="p-val gold">x{(1 / Math.max(livePrices.up.last, 0.01)).toFixed(2)}</div>
+                            </div>
+                        </div>
+
+                        {/* TRADING ACTIONS */}
+                        <div className="trade-actions" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '4px', marginTop: '8px', width: '100%' }}>
+                            <button disabled={ordering} onClick={() => handleBuy(0, 1)} className="quick-buy-btn green">$1</button>
+                            <button disabled={ordering} onClick={() => handleBuy(0, 5)} className="quick-buy-btn green">$5</button>
+                            <button disabled={ordering} onClick={() => handleBuy(0, 10)} className="quick-buy-btn green">$10</button>
+                        </div>
+                        {!client && <div style={{ fontSize: '0.7rem', color: '#94a3b8', marginTop: '4px', textAlign: 'center' }}>Login to Trade</div>}
                     </div>
-                    <a href={`https://polymarket.com/event/${event.slug}`} target="_blank" rel="noreferrer" className="trade-btn-large">Bet DOWN</a>
+
+                    {/* DOWN CARD */}
+                    <div className="focused-outcome-card down">
+                        <div className="outcome-header-row">
+                            <div className="outcome-label">📉 {outcomes[1] || 'DOWN'}</div>
+                            <div className="prob-badge" style={{ color: '#ef4444' }}>{(livePrices.down.last * 100).toFixed(1)}%</div>
+                        </div>
+                        {/* SPREAD INFO */}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#94a3b8', margin: '4px 0' }}>
+                            <span>Bid: <strong style={{ color: '#cbd5e1' }}>{livePrices.down.bid || '-'}</strong></span>
+                            <span>Ask: <strong style={{ color: '#f59e0b' }}>{livePrices.down.ask || '-'}</strong></span>
+                        </div>
+
+                        <div className="profit-grid">
+                            <div className="p-item">
+                                <div className="p-label">Price</div>
+                                <div className="p-val">${livePrices.down.last.toFixed(3)}</div>
+                            </div>
+                            <div className="p-item border-left">
+                                <div className="p-label">Return</div>
+                                <div className="p-val gold">x{(1 / Math.max(livePrices.down.last, 0.01)).toFixed(2)}</div>
+                            </div>
+                        </div>
+
+                        {/* TRADING ACTIONS */}
+                        <div className="trade-actions" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '4px', marginTop: '8px', width: '100%' }}>
+                            <button disabled={ordering} onClick={() => handleBuy(1, 1)} className="quick-buy-btn red">$1</button>
+                            <button disabled={ordering} onClick={() => handleBuy(1, 5)} className="quick-buy-btn red">$5</button>
+                            <button disabled={ordering} onClick={() => handleBuy(1, 10)} className="quick-buy-btn red">$10</button>
+                        </div>
+                        {!client && <div style={{ fontSize: '0.7rem', color: '#94a3b8', marginTop: '4px', textAlign: 'center' }}>Login to Trade</div>}
+                    </div>
                 </div>
             </div>
         </div>
