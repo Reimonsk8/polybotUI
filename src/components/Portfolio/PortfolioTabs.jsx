@@ -1,14 +1,16 @@
 import { useState, useEffect } from 'react'
 import './PortfolioTabs.css'
 import { fetchActivityLog as fetchActivityData } from './ActivityLogFetcher'
+import { Side, OrderType } from '@polymarket/clob-client'
 
-const PortfolioTabs = ({ userAddress, client }) => {
+const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
     const [activeTab, setActiveTab] = useState('active') // 'active', 'closed', 'activity'
     const [activeBets, setActiveBets] = useState([])
     const [closedPositions, setClosedPositions] = useState([])
     const [activityLog, setActivityLog] = useState([])
     const [loading, setLoading] = useState(false)
-    const [autoRefresh, setAutoRefresh] = useState(false)
+    const [liveUpdates, setLiveUpdates] = useState(false)
+    const [wsConnected, setWsConnected] = useState(false)
     const [hasFetched, setHasFetched] = useState(false)
 
     // AUTO-SELL STATE
@@ -65,8 +67,98 @@ const PortfolioTabs = ({ userAddress, client }) => {
                     size: Number(pos.size)
                 }))
 
-                setActiveBets(mappedPositions)
-                return mappedPositions // Return for chaining
+                // IF Live Updates are ON, fetch Real-Time Prices from CLOB
+                // 2. Standardize P&L Calculation Locally
+                // This ensures consistency between API load and Live updates
+                const standardizedPositions = mappedPositions.map(pos => {
+                    const size = parseFloat(pos.size) || 0
+                    const avg = parseFloat(pos.avgPrice) || 0
+                    const curr = parseFloat(pos.curPrice) || 0
+
+                    if (avg <= 0) return { ...pos, percentPnl: 0, pnl: 0 } // Avoid division by zero
+
+                    // Formula: (Current - Avg) / Avg
+                    const pnlRaw = (curr - avg) * size
+                    const percentRaw = (curr - avg) / avg
+
+                    return {
+                        ...pos,
+                        pnl: pnlRaw,
+                        percentPnl: percentRaw
+                    }
+                })
+
+                setActiveBets(standardizedPositions)
+
+                // IF Live Updates are ON, fetch Real-Time Prices from CLOB
+                if (liveUpdates) {
+                    try {
+                        const updatedPositions = await Promise.all(standardizedPositions.map(async (pos) => {
+                            if (!pos.asset) return pos
+
+                            try {
+                                let livePrice = 0
+                                let priceFound = false
+
+                                // OPTION A: Use Client OrderBook (Best)
+                                if (client) {
+                                    try {
+                                        const book = await client.getOrderBook(pos.asset)
+                                        if (book && book.bids && book.bids.length > 0) {
+                                            livePrice = parseFloat(book.bids[0].price)
+                                            priceFound = !isNaN(livePrice)
+                                        }
+                                    } catch (err) {
+                                        // Silent fail, fallback to fetch
+                                    }
+                                }
+
+                                // OPTION B: Raw Fetch (Fallback)
+                                if (!priceFound) {
+                                    const clobRes = await fetch(`https://clob.polymarket.com/price?token_id=${pos.asset}&side=sell`)
+                                    if (clobRes.ok) {
+                                        const clobData = await clobRes.json()
+                                        if (clobData.price) {
+                                            livePrice = parseFloat(clobData.price)
+                                            priceFound = true
+                                        }
+                                    }
+                                }
+
+                                if (priceFound) {
+                                    const avg = pos.avgPrice || 0
+
+                                    // Recalculate PnL (Live)
+                                    let newPnl = 0
+                                    let newPercentPnl = 0
+
+                                    if (avg > 0) {
+                                        newPnl = (livePrice - avg) * pos.size
+                                        newPercentPnl = (livePrice - avg) / avg
+                                    }
+
+                                    return {
+                                        ...pos,
+                                        curPrice: livePrice,
+                                        pnl: newPnl,
+                                        percentPnl: newPercentPnl,
+                                        isLive: true
+                                    }
+                                }
+                            } catch (e) { /* Ignore */ }
+                            return pos
+                        }))
+
+                        setActiveBets(updatedPositions)
+                        return updatedPositions
+                    } catch (err) {
+                        console.error("Failed to fetch live CLOB prices", err)
+                        // fallback used above
+                        return standardizedPositions
+                    }
+                }
+
+                return standardizedPositions
             } else {
                 setActiveBets([])
                 return []
@@ -251,22 +343,198 @@ const PortfolioTabs = ({ userAddress, client }) => {
         if (userAddress) handleFetchData()
     }, [activeTab, userAddress])
 
-    // Auto-refresh loop
+    // WebSocket for Live Updates
     useEffect(() => {
-        if (!autoRefresh && !autoSellEnabled) return
-        if (!userAddress) return
+        if (!liveUpdates || !apiCreds) {
+            setWsConnected(false)
+            return
+        }
 
-        // Speed up refresh if Auto-Sell is Enabled (10s), otherwise 30s
-        const intervalTime = autoSellEnabled ? 10000 : 30000
+        const ws = new WebSocket('wss://ws-subscriptions-clob.polymarket.com/ws/user')
+        let pingInterval
+
+        ws.onopen = () => {
+            console.log('[WS] Connected to User Channel')
+            setWsConnected(true)
+
+            // Authenticate
+            const authMsg = {
+                type: "user",
+                auth: {
+                    apiKey: apiCreds.apiKey,
+                    secret: apiCreds.secret,
+                    passphrase: apiCreds.passphrase
+                }
+            }
+            ws.send(JSON.stringify(authMsg))
+
+            // Start Ping (every 10s as requested)
+            pingInterval = setInterval(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'ping' }))
+                }
+            }, 10000)
+        }
+
+        ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data)
+
+            // Ignore pongs
+            if (msg.type === 'pong' || msg.type === 'error') return
+
+            console.log('[WS] Received:', msg)
+
+            // If we receive an Order or Trade event, refresh our data
+            // Common events: "order_created", "order_canceled", "trade_match"
+            // The user said: "Orders are placed, updated, or cancelled" and "Trades are matched"
+            if (msg.event_type && (
+                msg.event_type.includes('order') ||
+                msg.event_type.includes('trade') ||
+                msg.event_type.includes('fill')
+            )) {
+                console.log('[WS] Triggering Refresh due to event:', msg.event_type)
+
+                // Refresh relevant data
+                // We add a small delay to ensure the backend DB is consistent
+                setTimeout(() => {
+                    handleFetchData()
+                }, 500)
+            }
+        }
+
+        ws.onclose = () => {
+            console.log('[WS] Disconnected')
+            setWsConnected(false)
+            clearInterval(pingInterval)
+        }
+
+        ws.onerror = (err) => {
+            console.error('[WS] Error:', err)
+            setWsConnected(false)
+        }
+
+        return () => {
+            ws.close()
+            clearInterval(pingInterval)
+        }
+    }, [liveUpdates, apiCreds, userAddress]) // Re-connect if toggle or creds change
+
+
+
+    // POLL For Prices when Live Updates are ON
+    // The WebSocket only tells us about OUR trades (fills/cancels).
+    // It DOES NOT tell us if the market price changed.
+    // To show "Real Time Value" we must poll valid positions frequently.
+    useEffect(() => {
+        if (!liveUpdates || !userAddress) return
+
+        // Fetch frequently (every 2s) to keep Current Price and P&L fresh
+        const priceInterval = setInterval(() => {
+            if (activeTab === 'active') {
+                fetchActiveBets()
+            }
+        }, 2000)
+
+        return () => clearInterval(priceInterval)
+    }, [liveUpdates, activeTab, userAddress])
+
+    // Standard Auto-Sell polling (safety fallback)
+    useEffect(() => {
+        // If Live Updates IS ON, the interval above handles it (2s).
+        // If Live Updates IS OFF, but Auto-Sell IS ON, we use this slower poll (10s).
+        if (!autoSellEnabled || liveUpdates) return
 
         const interval = setInterval(() => {
             if (activeTab === 'active') fetchActiveBets()
-            else if (activeTab === 'closed') fetchClosedPositions()
-            else if (activeTab === 'activity') fetchActivityLog()
-        }, intervalTime)
+        }, 10000)
 
         return () => clearInterval(interval)
-    }, [autoRefresh, autoSellEnabled, activeTab, userAddress])
+    }, [autoSellEnabled, liveUpdates, activeTab, userAddress])
+
+    // SELL LOGIC
+    const handleSellPosition = async (bet) => {
+        if (!client) {
+            alert("L2 Authentication required to sell.")
+            return
+        }
+
+        const sizeToSell = bet.size
+        // Use live price if available, otherwise fetch or use curPrice
+        let sellPrice = bet.curPrice
+
+        // Confirm
+        const estValue = sizeToSell * sellPrice
+        if (!confirm(`Are you sure you want to SELL ALL ${bet.size.toFixed(2)} shares of ${bet.title} (${bet.outcome})?\n\nEstimated Payout: $${estValue.toFixed(2)}`)) {
+            return
+        }
+
+        try {
+            // 1. Fetch Fresh Best Bid (Sell Price) to be safe
+            // 'sell' side on CLOB price endpoint gives the highest BID (the price we can sell into)
+            // 1. Fetch Fresh Best Bid (Sell Price) using OrderBook
+            // This avoids 404 errors from the /price endpoint
+            if (bet.asset) {
+                try {
+                    const book = await client.getOrderBook(bet.asset)
+                    if (book && book.bids && book.bids.length > 0) {
+                        // bids[0] is the highest bid (best sell price)
+                        const bestBid = parseFloat(book.bids[0].price)
+                        if (!isNaN(bestBid)) {
+                            sellPrice = bestBid
+                            console.log(`[Sell] Found fresh best bid from OrderBook: ${sellPrice}`)
+                        }
+                    } else {
+                        console.warn("[Sell] OrderBook has no bids, defaulting to current display price.")
+                    }
+                } catch (e) {
+                    console.warn("Could not fetch OrderBook, using current display price.", e)
+                }
+            }
+
+            // Validate and Clamp Price
+            // Polymarket requires prices between 0.001 and 0.999 (exclusive of 0 and 1)
+            if (sellPrice >= 1) sellPrice = 0.99
+            if (sellPrice <= 0) sellPrice = 0.01
+
+            // Final safety check
+            if (isNaN(sellPrice)) {
+                alert("Cannot sell: Unable to determine a valid market price.")
+                return
+            }
+
+            console.log(`[Sell] Selling ${sizeToSell} of ${bet.asset} @ ${sellPrice} (Clamped)`)
+
+            // 2. Place Order (Create AND Post)
+            const response = await client.createAndPostOrder({
+                tokenID: bet.asset,
+                price: sellPrice,
+                side: Side.SELL,
+                size: sizeToSell,
+                nonce: Date.now()
+            }, {
+                // Options: Tick size check might be strict, let's assume standard 0.01 or derive from market if needed.
+                // For now, we rely on the client defaults or user warning if it fails.
+            }, OrderType.GTC)
+
+            console.log("Sell Order Response:", response)
+
+            if (response && response.orderID) {
+                alert(`Sell Order Placed Successfully! ID: ${response.orderID}`)
+            } else {
+                alert("Sell Order Submitted (Check Activity)")
+            }
+
+            console.log("Sell Order Placed:", order)
+            alert(`Sell Order Placed! ID: ${order.orderID || 'Submitted'}`)
+
+            // Refresh
+            setTimeout(fetchActiveBets, 1000)
+
+        } catch (err) {
+            console.error("Sell Failed:", err)
+            alert(`Sell Failed: ${err.message}`)
+        }
+    }
 
     const formatCurrency = (value) => `$${parseFloat(value).toFixed(2)}`
 
@@ -311,7 +579,8 @@ const PortfolioTabs = ({ userAddress, client }) => {
                                             return
                                         }
                                         setAutoSellEnabled(e.target.checked)
-                                        if (e.target.checked) setAutoRefresh(true) // Force auto-refresh on
+                                        // Force Live Updates ON if Auto-Sell is enabled for better data
+                                        if (e.target.checked && !liveUpdates) setLiveUpdates(true)
                                     }}
                                     style={{ accentColor: '#10b981' }}
                                 />
@@ -400,6 +669,10 @@ const PortfolioTabs = ({ userAddress, client }) => {
                                                     <p className="market-description">{bet.description}</p>
                                                 )}
 
+                                                <div className="position-summary-text" style={{ fontSize: '0.85rem', color: '#94a3b8', marginBottom: '12px' }}>
+                                                    ${(bet.size * bet.avgPrice).toFixed(2)} on <span className={`outcome-text-inline ${bet.outcome.toLowerCase()}`} style={{ fontWeight: '600', color: bet.outcome === 'Yes' || bet.outcome === 'Up' ? '#10b981' : '#ef4444' }}>{bet.outcome}</span> to win <span style={{ color: '#e2e8f0', fontWeight: '500' }}>${bet.size.toFixed(2)}</span>
+                                                </div>
+
                                                 <div className="position-stats">
                                                     <div className="stat">
                                                         <span className="stat-label">Size</span>
@@ -410,15 +683,48 @@ const PortfolioTabs = ({ userAddress, client }) => {
                                                         <span className="stat-value">{formatCurrency(bet.avgPrice)}</span>
                                                     </div>
                                                     <div className="stat">
-                                                        <span className="stat-label">Price</span>
-                                                        <span className="stat-value" style={{ color: '#f59e0b' }}>{formatCurrency(bet.curPrice)}</span>
+                                                        <span className="stat-label">Price {bet.isLive && '⚡'}</span>
+                                                        <span className="stat-value" style={{ color: bet.isLive ? '#10b981' : '#f59e0b' }}>{formatCurrency(bet.curPrice)}</span>
+                                                    </div>
+                                                    <div className="stat">
+                                                        <span className="stat-label">Value</span>
+                                                        <span className="stat-value" style={{ fontWeight: '700', color: '#e2e8f0' }}>{formatCurrency(bet.size * bet.curPrice)}</span>
                                                     </div>
                                                     <div className="stat">
                                                         <span className="stat-label">P&L</span>
                                                         <span className={`stat-value ${bet.percentPnl >= 0 ? 'positive' : 'negative'}`}>
-                                                            {bet.percentPnl >= 0 ? '+' : ''}{(bet.percentPnl * 100).toFixed(1)}%
+                                                            {formatCurrency((bet.curPrice - bet.avgPrice) * bet.size)} ({bet.percentPnl >= 0 ? '+' : ''}{(bet.percentPnl * 100).toFixed(1)}%)
                                                         </span>
                                                     </div>
+                                                </div>
+
+                                                {/* SELL BUTTON */}
+                                                <div className="position-actions" style={{ marginTop: '12px', borderTop: '1px solid #334155', paddingTop: '12px' }}>
+                                                    <button
+                                                        className="sell-btn"
+                                                        onClick={() => handleSellPosition(bet)}
+                                                        disabled={!client}
+                                                        style={{
+                                                            width: '100%',
+                                                            padding: '10px',
+                                                            borderRadius: '6px',
+                                                            background: '#ef4444',
+                                                            color: 'white',
+                                                            border: 'none',
+                                                            fontWeight: '600',
+                                                            cursor: client ? 'pointer' : 'not-allowed',
+                                                            opacity: client ? 1 : 0.6,
+                                                            display: 'flex',
+                                                            justifyContent: 'center',
+                                                            alignItems: 'center',
+                                                            gap: '8px'
+                                                        }}
+                                                    >
+                                                        <span>💸 Sell All</span>
+                                                        <span style={{ fontWeight: '400', fontSize: '0.9em', opacity: 0.9 }}>
+                                                            (Est. {formatCurrency(bet.size * bet.curPrice)})
+                                                        </span>
+                                                    </button>
                                                 </div>
                                             </div>
                                         ))}
@@ -518,14 +824,23 @@ const PortfolioTabs = ({ userAddress, client }) => {
 
                 {/* Auto-refresh Toggle - Footer */}
                 <div className="auto-refresh-toggle">
-                    <label>
+                    <label style={{ opacity: apiCreds ? 1 : 0.5, cursor: apiCreds ? 'pointer' : 'not-allowed' }}>
                         <input
                             type="checkbox"
-                            checked={autoRefresh}
-                            onChange={(e) => setAutoRefresh(e.target.checked)}
+                            checked={liveUpdates}
+                            onChange={(e) => {
+                                if (!apiCreds) {
+                                    alert("L2 Authentication required for Live Updates. Please login with API Keys or Private Key.")
+                                    return
+                                }
+                                setLiveUpdates(e.target.checked)
+                            }}
+                            disabled={!apiCreds}
                         />
-                        <span className="refresh-icon">🔄</span>
-                        Auto-refresh every {autoSellEnabled ? '10' : '30'}s
+                        <span className="refresh-icon" style={{ color: liveUpdates ? (wsConnected ? '#10b981' : '#f59e0b') : 'inherit' }}>
+                            {liveUpdates ? '⚡' : '⚪'}
+                        </span>
+                        {liveUpdates ? 'Live' : 'Enable Live Updates (WebSocket/Poll)'}
                     </label>
                 </div>
             </div>

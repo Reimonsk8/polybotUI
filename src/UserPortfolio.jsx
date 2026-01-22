@@ -26,6 +26,9 @@ const UserPortfolio = ({ onStateChange }) => {
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState(null)
     const [client, setClient] = useState(null)
+    const [apiCreds, setApiCreds] = useState(null)
+    const [savedPrivateKey, setSavedPrivateKey] = useState(null)
+    const [signatureType, setSignatureType] = useState(0) // 0=EOA, 1=PolyProxy, 2=Gnosis
 
     // Session management constants
     const SESSION_KEY = 'polymarket_session'
@@ -50,10 +53,43 @@ const UserPortfolio = ({ onStateChange }) => {
                     setLoginMethod(session.loginMethod)
                     setIsL2Authenticated(session.isL2Authenticated)
                     setPositions(session.positions || [])
-                    setPortfolioValue(session.portfolioValue || null)
+                    // Restore credentials into State
+                    if (session.apiCreds) setApiCreds(session.apiCreds)
+                    if (session.privateKey) setSavedPrivateKey(session.privateKey)
+                    if (session.signatureType !== undefined) setSignatureType(session.signatureType)
 
-                    // Note: Client will need to be re-initialized on first action
-                    // This is acceptable as we're just restoring the UI state
+                    // RE-HYDRATE CLIENT (Critical for refresh)
+                    if (session.apiCreds) {
+                        try {
+                            const chainId = 137
+                            let signer = undefined
+
+                            // If we have a private key, recreate the signer
+                            if (session.privateKey) {
+                                const rpcUrl = "https://polygon-rpc.com"
+                                const provider = new ethers.providers.JsonRpcProvider(rpcUrl)
+                                signer = new ethers.Wallet(session.privateKey, provider)
+                            }
+
+                            // Restore signature type and proxy address
+                            const savedSigType = session.signatureType !== undefined ? session.signatureType : 0
+                            const savedProxy = session.proxyAddress || session.address
+
+                            const l2Client = new ClobClient(
+                                "https://clob.polymarket.com",
+                                chainId,
+                                signer,
+                                session.apiCreds,
+                                savedSigType,
+                                savedProxy
+                            )
+                            setClient(l2Client)
+                            console.log('[Session] Re-hydrated L2 Client from storage')
+                        } catch (rehydrateErr) {
+                            console.error('[Session] Failed to rehydrate client:', rehydrateErr)
+                        }
+                    }
+
                 } else {
                     // Session expired, clear it
                     localStorage.removeItem(SESSION_KEY)
@@ -131,10 +167,14 @@ const UserPortfolio = ({ onStateChange }) => {
                 loginMethod,
                 isL2Authenticated,
                 positions,
-                portfolioValue
+                portfolioValue,
+                apiCreds,
+                privateKey: savedPrivateKey,
+                signatureType,
+                proxyAddress
             })
         }
-    }, [address, username, profileImage, cashBalance, loginMethod, isL2Authenticated, positions, portfolioValue])
+    }, [address, username, profileImage, cashBalance, loginMethod, isL2Authenticated, positions, portfolioValue, apiCreds, savedPrivateKey, signatureType, proxyAddress])
 
     // Propagate State to Parent (App.jsx) for Trading Views
     useEffect(() => {
@@ -151,9 +191,17 @@ const UserPortfolio = ({ onStateChange }) => {
         try {
             const res = await fetch(`https://data-api.polymarket.com/value?user=${userAddress}`)
             if (res.ok) {
-                // The API usually returns the value directly as json number or string
                 const data = await res.json()
-                const val = parseFloat(data)
+                // Handle different response formats (raw number vs object)
+                let val = NaN
+                if (typeof data === 'number') {
+                    val = data
+                } else if (typeof data === 'string') {
+                    val = parseFloat(data)
+                } else if (typeof data === 'object' && data !== null) {
+                    val = parseFloat(data.value || data.amount || 0)
+                }
+
                 if (!isNaN(val)) {
                     setPortfolioValue(val)
                 }
@@ -232,9 +280,11 @@ const UserPortfolio = ({ onStateChange }) => {
             let creds
             try {
                 creds = await l1Client.deriveApiKey()
+                setApiCreds(creds)
             } catch (deriveErr) {
                 try {
                     creds = await l1Client.createApiKey()
+                    setApiCreds(creds)
                 } catch (createErr) {
                     throw new Error("Could not obtain API credentials. " + createErr.message)
                 }
@@ -265,12 +315,14 @@ const UserPortfolio = ({ onStateChange }) => {
                 proxyAddress // Funder
             )
 
+
             setClient(l2Client)
 
             // Store proxy address both in state AND localStorage for persistence
             setProxyAddress(proxyAddress)
+            setSignatureType(signatureType) // Update state
             localStorage.setItem('polymarket_proxy_address', proxyAddress)
-            console.log('[L2 Login] Saved proxy address to localStorage:', proxyAddress)
+            console.log(`[L2 Login] Initialized Client. Type: ${signatureType} (0=EOA, 1=Proxy), Proxy: ${proxyAddress}`)
 
             setIsL2Authenticated(true)
 
@@ -417,8 +469,10 @@ const UserPortfolio = ({ onStateChange }) => {
                 loginMethod: 'l1',
                 isL2Authenticated,
                 privateKey: privateKeyInput,
-                proxyAddress: proxyAddressInput
+                proxyAddress: proxyAddressInput,
+                apiCreds // Include creds we just derived/created
             })
+            setSavedPrivateKey(privateKeyInput) // Update state so auto-save works later
 
         } catch (err) {
             setError(err.message)
@@ -442,6 +496,7 @@ const UserPortfolio = ({ onStateChange }) => {
                 secret,
                 passphrase
             }
+            setApiCreds(creds)
 
             const l2Client = new ClobClient(
                 "https://clob.polymarket.com",
@@ -493,6 +548,7 @@ const UserPortfolio = ({ onStateChange }) => {
 
             setAddress(userAddress)
             setLoginMethod('full')
+            setSavedPrivateKey(key) // Save to state
 
             // Fetch info
             fetchPositions(userAddress)
@@ -513,10 +569,18 @@ const UserPortfolio = ({ onStateChange }) => {
             const positionsRes = await fetch(`https://data-api.polymarket.com/positions?user=${userAddress}`)
             if (positionsRes.ok) {
                 const positionsData = await positionsRes.json()
-                const active = positionsData.filter(p => p.size > 0)
+                // Safely parse numbers to avoid NaN
+                const active = positionsData
+                    .filter(p => parseFloat(p.size) > 0.000001)
+                    .map(p => ({
+                        ...p,
+                        size: parseFloat(p.size) || 0,
+                        curPrice: parseFloat(p.curPrice) || 0
+                    }))
                 setPositions(active)
             }
         } catch (err) {
+            console.error('Failed to fetch positions:', err)
         }
     }
 
@@ -538,9 +602,16 @@ const UserPortfolio = ({ onStateChange }) => {
         setPortfolioValue(null)
     }
 
-    // Use API portfolio value if available, otherwise fallback to calculated
-    const calculatedValue = positions.reduce((sum, p) => sum + (p.curPrice * p.size), 0)
-    const displayValue = portfolioValue !== null ? portfolioValue : calculatedValue
+    // Calculate total value: (Sum of Positions) + (Cash Balance)
+    // We use this if the direct API value is unavailable or fails
+    const positionsValue = positions.reduce((sum, p) => sum + (p.curPrice * p.size), 0)
+
+    // Total Value Logic:
+    // 1. Try to use the explicit portfolioValue from API
+    // 2. Fallback to: Positions Value + Cash Balance
+    const displayValue = (portfolioValue !== null && !isNaN(portfolioValue))
+        ? portfolioValue
+        : positionsValue
 
     if (!address) {
         return (
@@ -573,7 +644,7 @@ const UserPortfolio = ({ onStateChange }) => {
 
 
             {console.log('[UserPortfolio] Rendering with:', { address, proxyAddress, using: proxyAddress || address })}
-            <PortfolioTabs userAddress={proxyAddress || address} client={client} />
+            <PortfolioTabs userAddress={proxyAddress || address} client={client} apiCreds={apiCreds} />
         </div>
     )
 }

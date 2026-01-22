@@ -380,7 +380,7 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                 price: bestAsk,
                 side: 'BUY',
                 size: shares,
-                size: shares,
+
                 feeRateBps: 1000, // Explicit requirement from error message (0 failed)
                 nonce: Date.now()
             })
