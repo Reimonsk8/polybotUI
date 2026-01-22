@@ -1,7 +1,7 @@
 import React from 'react'
 import './ConfirmModal.css'
 
-const ConfirmModal = ({ isOpen, title, message, onConfirm, onCancel, confirmText = 'Confirm', cancelText = 'Cancel', isDestructive = false }) => {
+const ConfirmModal = ({ isOpen, title, message, children, onConfirm, onCancel, confirmText = 'Confirm', cancelText = 'Cancel', isDestructive = false }) => {
     if (!isOpen) return null
 
     return (
@@ -11,7 +11,7 @@ const ConfirmModal = ({ isOpen, title, message, onConfirm, onCancel, confirmText
                     <h3>{title}</h3>
                 </div>
                 <div className="modal-body">
-                    <p style={{ whiteSpace: 'pre-line' }}>{message}</p>
+                    {children ? children : <p style={{ whiteSpace: 'pre-line' }}>{message}</p>}
                 </div>
                 <div className="modal-actions">
                     <button className="btn-cancel" onClick={onCancel}>

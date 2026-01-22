@@ -38,52 +38,8 @@ function App() {
       const data = await response.json()
 
       // Fetch live prices for each market from CLOB
-      const marketsWithLivePrices = await Promise.all(
-        data.map(async (event) => {
-          const market = event.markets?.[0]
-          if (!market) return event
-
-          try {
-            const tokenIds = JSON.parse(market.clobTokenIds || '[]')
-            const originalPrices = JSON.parse(market.outcomePrices || '[]')
-            const livePrices = []
-
-            // Fetch live price for each outcome
-            for (let i = 0; i < tokenIds.length; i++) {
-              const tokenId = tokenIds[i]
-              try {
-                const priceResponse = await fetch(
-                  `https://clob.polymarket.com/price?token_id=${tokenId}&side=buy`,
-                  { signal: AbortSignal.timeout(5000) } // 5 second timeout
-                )
-                if (priceResponse.ok) {
-                  const priceData = await priceResponse.json()
-                  livePrices.push(priceData.price || originalPrices[i] || '0')
-                } else {
-                  // Use original price if CLOB fails (e.g., 404)
-                  livePrices.push(originalPrices[i] || '0')
-                }
-              } catch (fetchErr) {
-                // Use original price on timeout or network error
-                livePrices.push(originalPrices[i] || '0')
-              }
-            }
-
-            // Update market with live prices
-            return {
-              ...event,
-              markets: [{
-                ...market,
-                outcomePrices: JSON.stringify(livePrices),
-                livePrices: livePrices,
-                lastUpdated: new Date().toISOString()
-              }]
-            }
-          } catch (err) {
-            return event
-          }
-        })
-      )
+      // Use Gamma API data directly - Do not fetch /price from CLOB (it 404s)
+      const marketsWithLivePrices = data
 
       setMarkets(marketsWithLivePrices)
       setLastUpdate(new Date().toLocaleTimeString())

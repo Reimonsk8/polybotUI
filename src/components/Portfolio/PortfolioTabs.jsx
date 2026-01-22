@@ -193,74 +193,86 @@ const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
             for (const bet of activeBets) {
                 // Skip if already triggered or invalid
                 if (triggeredOrders.has(bet.conditionId)) continue
+                // Skip if asset ID is missing (can happen with Gamma positions that don't map to CLOB tokens)
                 if (!bet.asset || bet.size <= 0) continue
 
-                // Calculate PnL locally to be sure (API PnL can be stale or calculated differently)
-                // (Current - Avg) / Avg
-                // Avoid division by zero
-                if (bet.avgPrice <= 0) continue
-
-                const priceChange = (bet.curPrice - bet.avgPrice)
-                const currentPnlPercent = (priceChange / bet.avgPrice) * 100
-
+                // Check profitability
                 let shouldSell = false
                 let reason = ''
 
-                // Take Profit Logic
+                // Calculate PnL (API vs Local)
+                // Use Standardized 'percentPnl' which is already live-updated
+                const currentPnlPercent = bet.percentPnl * 100
+
+                // Take Profit
                 if (currentPnlPercent >= takeProfitPercent) {
                     shouldSell = true
-                    reason = `Take Profit hit: +${currentPnlPercent.toFixed(1)}% (Threshold: ${takeProfitPercent}%)`
+                    reason = `Take Profit: +${currentPnlPercent.toFixed(1)}%`
                 }
-
-                // Stop Loss Logic (Loss is negative PnL)
-                // If PnL is -51% and Limit is 50%, we sell
+                // Stop Loss
                 else if (currentPnlPercent <= -stopLossPercent) {
                     shouldSell = true
-                    reason = `Stop Loss hit: ${currentPnlPercent.toFixed(1)}% (Threshold: -${stopLossPercent}%)`
+                    reason = `Stop Loss: ${currentPnlPercent.toFixed(1)}%`
                 }
 
                 if (shouldSell) {
-                    console.log(`[Auto Sell] TRIGGERING SELL for ${bet.title}: ${reason}`)
+                    console.log(`[Auto Sell] Attempting to sell ${bet.title} (${reason})`)
 
-                    // Prevent double-fire immediately
+                    // 1. Mark as triggered IMMEDIATELY to prevent loops/race conditions
                     setTriggeredOrders(prev => new Set(prev).add(bet.conditionId))
 
                     try {
-                        // Execute Market Sell (Limit 0)
-                        // Note: Depending on Client setup, we might need to derive signer
-                        // But client passed from UserPortfolio should be ready
-
-                        // We use a safe low price to act as "Market Sell" (e.g. 0.05 or lower?)
-                        // Polymarket usually matches best bid. 0 may be rejected. 0.01 is returned as minimum tick often.
-                        // Let's us 0.0 if library allows, or 0.001
-
-                        if (!client.signer) {
-                            console.warn("Cannot sell: Read-only client")
+                        if (!client || !client.signer) {
+                            console.warn("[Auto Sell] Client not ready or read-only.")
                             continue
                         }
 
-                        // We need the Token ID (asset_id)
-                        const order = await client.createOrder({
+                        // 2. PRE-FLIGHT: Check Liquidity (GET /book)
+                        // If book 404s or is empty, we ABORT.
+                        let bestBid = 0
+                        try {
+                            const book = await client.getOrderBook(bet.asset)
+                            if (book && book.bids && book.bids.length > 0) {
+                                bestBid = parseFloat(book.bids[0].price)
+                            } else {
+                                throw new Error("No Bids Available")
+                            }
+                        } catch (e) {
+                            console.warn(`[Auto Sell] Skipped ${bet.title}: Market illiquid or invalid token.`, e.message)
+                            toast.error(`Auto-Sell Skipped: ${bet.title} has no liquidity.`)
+                            // We leave it in 'triggeredOrders' so we don't spam retry. 
+                            // User must intervene manually or refresh.
+                            continue
+                        }
+
+                        // 3. SAFE PRICE LOGIC
+                        // Clamp to [0.01, 0.99]
+                        let sellPrice = bestBid
+                        if (sellPrice >= 1) sellPrice = 0.99
+                        if (sellPrice <= 0) sellPrice = 0.01
+
+                        console.log(`[Auto Sell] Execution Price: ${sellPrice} for ${bet.size} shares`)
+
+                        // 4. SUBMIT ORDER
+                        const generateNonce = () => Date.now() + Math.floor(Math.random() * 1000)
+
+                        const order = await client.createAndPostOrder({
                             tokenID: bet.asset,
-                            price: 0.005, // Basically Market Sell
-                            side: 'SELL',
+                            price: parseFloat(sellPrice.toFixed(4)),
+                            side: Side.SELL,
                             size: bet.size,
-                            feeRateBps: 1000,
-                            nonce: Date.now()
+                            nonce: generateNonce()
                         })
 
-                        console.log('[Auto Sell] Order Placed:', order)
-                        // We could show a notification here
-                        alert(`Auto-Sold ${bet.title}\nReason: ${reason}`)
+                        console.log('[Auto Sell] Success:', order)
+                        toast.success(`Strategy Triggered: Sold ${bet.title} @ ${sellPrice} (${reason})`)
 
                     } catch (err) {
-                        console.error('[Auto Sell] Order Failed:', err)
-                        // Allow retry?
-                        setTriggeredOrders(prev => {
-                            const newSet = new Set(prev)
-                            newSet.delete(bet.conditionId) // Remove from blocklist so we retry next tick
-                            return newSet
-                        })
+                        console.error('[Auto Sell] Failed:', err)
+                        toast.error(`Auto-Sell Failed for ${bet.title}: ${err.message}`)
+                        // Do NOT remove from triggeredOrders. 
+                        // If it failed once (e.g. invalid params), it will likely fail again.
+                        // Prevent infinite loop.
                     }
                 }
             }
@@ -488,54 +500,75 @@ const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
         let sellPrice = bet.curPrice
 
         try {
-            // 1. Fetch Fresh Best Bid (Sell Price) to be safe
-            // 'sell' side on CLOB price endpoint gives the highest BID (the price we can sell into)
-            // 1. Fetch Fresh Best Bid (Sell Price) using OrderBook
-            // This avoids 404 errors from the /price endpoint
+            // 1. MANDATORY: Fetch Fresh Best Bid (Sell Price)
+            // If the orderbook 404s or is empty, we CANNOT sell safely.
+            let bestBid = 0
+
             if (bet.asset) {
                 try {
                     const book = await client.getOrderBook(bet.asset)
+
+                    // Logic: To SELL, we match the BID side.
+                    // If no bids, there is no liquidity to sell into.
                     if (book && book.bids && book.bids.length > 0) {
-                        // bids[0] is the highest bid (best sell price)
-                        const bestBid = parseFloat(book.bids[0].price)
-                        if (!isNaN(bestBid)) {
-                            sellPrice = bestBid
-                            console.log(`[Sell] Found fresh best bid from OrderBook: ${sellPrice}`)
-                        }
+                        bestBid = parseFloat(book.bids[0].price)
+                        console.log(`[Sell] Found fresh best bid: ${bestBid}`)
                     } else {
-                        console.warn("[Sell] OrderBook has no bids, defaulting to current display price.")
+                        throw new Error("No buyers (Bids) available on the orderbook.")
                     }
                 } catch (e) {
-                    console.warn("Could not fetch OrderBook, using current display price.", e)
+                    console.error("OrderBook fetch failed:", e)
+                    // If 404 or other error, we must abort.
+                    // "No orderbook exists" means token is not tradable.
+                    toast.error(`Cannot Sell: Market data unavailable or illiquid. (${e.message})`)
+                    return
                 }
-            }
-
-            // Validate and Clamp Price
-            // Polymarket requires prices between 0.001 and 0.999 (exclusive of 0 and 1)
-            if (sellPrice >= 1) sellPrice = 0.99
-            if (sellPrice <= 0) sellPrice = 0.01
-
-            // Final safety check
-            if (isNaN(sellPrice)) {
-                toast.error("Cannot sell: Unable to determine a valid market price.")
+            } else {
+                toast.error("Invalid position data (missing asset ID).")
                 return
             }
 
-            console.log(`[Sell] Selling ${sizeToSell} of ${bet.asset} @ ${sellPrice} (Clamped)`)
+            // Price Logic: Sell at Best Bid
+            // Clamp to valid range
+            if (bestBid >= 1) bestBid = 0.99
+            if (bestBid <= 0) bestBid = 0.01 // Should have been caught by "No buyers" check theoretically
 
-            // 2. Place Order (Create AND Post)
-            const response = await client.createAndPostOrder({
+            let sellPrice = bestBid
+
+            console.log(`[Sell] Selling ${sizeToSell} of ${bet.asset} @ ${sellPrice}`)
+
+            // 2. Place Order (Create AND Post) with Robust Nonce
+            const generateNonce = () => Date.now() + Math.floor(Math.random() * 1000)
+
+            const payload = {
                 tokenID: bet.asset,
-                price: sellPrice,
+                price: parseFloat(sellPrice.toFixed(4)), // Ensure precision
                 side: Side.SELL,
                 size: sizeToSell,
-                nonce: Date.now()
-            }, {
-                // Options: Tick size check might be strict, let's assume standard 0.01 or derive from market if needed.
-                // For now, we rely on the client defaults or user warning if it fails.
-            }, OrderType.GTC)
+            }
+
+            let response = await client.createAndPostOrder({
+                ...payload,
+                nonce: generateNonce()
+            })
+
+            // Retry for Nonce (Single Retry)
+            if (response && response.error && response.error.includes('nonce')) {
+                console.warn("Nonce collision on Sell. Retrying in 500ms...")
+                await new Promise(r => setTimeout(r, 500))
+
+                response = await client.createAndPostOrder({
+                    ...payload,
+                    nonce: generateNonce()
+                })
+            }
 
             console.log("Sell Order Response:", response)
+
+            // Explicit Error Handling
+            if (response && (response.error || (response.status && response.status >= 400))) {
+                throw new Error(response.error || response.data?.error || "Order Failed")
+            }
 
             if (response && response.orderID) {
                 toast.success(`Sell Order Placed! ID: ${response.orderID}`)

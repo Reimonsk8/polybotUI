@@ -1,13 +1,13 @@
 import { useState, useEffect, useRef } from 'react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceLine } from 'recharts'
 import { toast } from 'react-toastify'
+import ConfirmModal from './Portfolio/ConfirmModal'
 import './FocusedMarketView.css'
 
 const FocusedMarketView = ({ event, client, userAddress }) => {
     const market = event.markets?.[0]
     const outcomes = JSON.parse(market?.outcomes || '[]')
 
-    // Outcome Pricing State
     // Outcome Pricing State
     const [priceHistory, setPriceHistory] = useState([])
     // Structure: { bid: 0, ask: 0, last: 0 }
@@ -16,12 +16,17 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
         down: { bid: 0, ask: 0, last: 0, bidSize: 0, askSize: 0 }
     })
     const [tradeAmount, setTradeAmount] = useState(10) // Default trade amount
+
+    // Trading Flow State
+    const [confirmModalOpen, setConfirmModalOpen] = useState(false)
+    const [pendingTrade, setPendingTrade] = useState(null)
+    const [orderStatus, setOrderStatus] = useState('IDLE') // IDLE, SUBMITTING, OPEN, FILLED, CANCELLED
+    const [activeOrderId, setActiveOrderId] = useState(null)
+
     const [isConnected, setIsConnected] = useState(false)
     const wsRef = useRef(null)
 
-    // Trading State
-    const [ordering, setOrdering] = useState(false)
-    const [orderStatus, setOrderStatus] = useState(null)
+
 
     // Asset Pricing State
     const [assetSymbol, setAssetSymbol] = useState(null)
@@ -345,7 +350,10 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
     }
 
     // 4. TRADING LOGIC - STRATEGIES
-    const executeStrategy = async (outcomeIndex, strategy) => {
+    // 4. TRADING WORKFLOW
+
+    // STEP A: Initiate Trade (Pre-Check & Modal)
+    const initiateTrade = async (outcomeIndex, strategy) => {
         if (!client) {
             toast.error("Please Login (L2) to trade.")
             return
@@ -356,103 +364,140 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
         const outcomeName = outcomes[outcomeIndex]
         const currentPriceObj = outcomeIndex === 0 ? livePrices.up : livePrices.down
 
-        setOrdering(true)
-        const toastId = toast.loading(`${strategy === 'PASSIVE' ? '🛡️ Passive' : '⚡ Fast'} Buy: $${tradeAmount} of ${outcomeName}...`)
+        // Estimates based on Strategy
+        let estPrice = 0
+        let worstCasePrice = 0
 
         try {
-            let price = 0
+            // Fetch fresh book for estimate
+            let bestBid = currentPriceObj.bid
+            let bestAsk = currentPriceObj.ask
 
-            // --- STRATEGY 1: PASSIVE (BEST BID) ---
+            // If missing from WS, try fetch
+            if (!bestBid || !bestAsk) {
+                const book = await client.getOrderBook(tokenId)
+                if (book.bids.length > 0) bestBid = parseFloat(book.bids[0].price)
+                if (book.asks.length > 0) bestAsk = parseFloat(book.asks[0].price)
+            }
+
             if (strategy === 'PASSIVE') {
-                // Use WS data for speed, but fallback to Orderbook Fetch if missing
-                price = currentPriceObj.bid
-                if (!price || price <= 0) {
-                    // Try fetch
-                    try {
-                        const book = await client.getOrderBook(tokenId)
-                        if (book.bids.length > 0) price = parseFloat(book.bids[0].price)
-                    } catch (e) { }
-                }
-                if (!price) throw new Error("No Bid Price available to join.")
-            }
-
-            // --- STRATEGY 2: AGGRESSIVE (MARKETABLE LIMIT) ---
-            else {
-                // Target Best Ask
-                let bestAsk = currentPriceObj.ask
-                if (!bestAsk || bestAsk <= 0) {
-                    try {
-                        const book = await client.getOrderBook(tokenId)
-                        if (book.asks.length > 0) bestAsk = parseFloat(book.asks[0].price)
-                    } catch (e) { }
-                }
-
+                // Buying at Best Bid (Maker)
+                if (!bestBid) throw new Error("No Bid Price available to join.")
+                estPrice = bestBid
+                worstCasePrice = estPrice // Fixed price limit
+            } else {
+                // Buying at Best Ask (Taker)
                 if (!bestAsk) throw new Error("No Ask Liquidity.")
-
-                // Applied Slippage (0.5%)
-                price = bestAsk + 0.005
-                // Clamp to 0.99
-                if (price > 0.99) price = 0.99
+                estPrice = bestAsk
+                worstCasePrice = Math.min(bestAsk + 0.005, 0.99) // 0.5% Slippage
             }
 
-            // Calculate Size
-            // Note: If buying at 'price', shares = amount / price
-            const shares = tradeAmount / price
+            // Calculate Shares
+            let shares = tradeAmount / estPrice
+            if (shares * estPrice < 1.0001) shares = 1.0001 / estPrice // Min size check
 
-            console.log(`[Strategy] ${strategy} -> Price: ${price}, Shares: ${shares}`)
-
-            const order = await client.createAndPostOrder({
-                tokenID: tokenId,
-                price: price,
+            setPendingTrade({
+                strategy,
                 side: 'BUY',
-                size: shares,
-                nonce: Date.now()
+                outcomeName,
+                outcomeIndex,
+                tokenId,
+                price: estPrice,
+                worstCasePrice,
+                shares,
+                estCost: shares * estPrice,
+                timestamp: Date.now()
+            })
+            setConfirmModalOpen(true)
+
+        } catch (e) {
+            toast.error(`Cannot initiate trade: ${e.message}`)
+        }
+    }
+
+    // STEP B: Confirm & Execute (Double-Check & Submit)
+    const confirmTrade = async () => {
+        if (!pendingTrade || !client) return
+        setConfirmModalOpen(false)
+        setOrderStatus('SUBMITTING')
+        const toastId = toast.loading(`Submitting ${pendingTrade.side} Order...`)
+
+        try {
+            // 1. SAFETY CHECK: Re-verify Market Conditions
+            const book = await client.getOrderBook(pendingTrade.tokenId)
+            // Fix: handle empty books
+            const bestBid = book.bids && book.bids.length > 0 ? parseFloat(book.bids[0].price) : 0
+            const bestAsk = book.asks && book.asks.length > 0 ? parseFloat(book.asks[0].price) : 1
+
+            let finalPrice = pendingTrade.price
+
+            if (pendingTrade.strategy === 'PASSIVE') {
+                // For Passive, we stick to our price. 
+                // Optionally check if we are crossing the spread (if bid > ask now?) - unlikely but possible.
+            } else {
+                // TAKING: Check if Best Ask is still within worstCasePrice
+                if (bestAsk > pendingTrade.worstCasePrice) {
+                    throw new Error(`Price moved! Ask is ${bestAsk}, limit was ${pendingTrade.worstCasePrice.toFixed(3)}.`)
+                }
+                // Optimize: If Ask is lower/same, take it, but max at worstCase
+                finalPrice = Math.min(Math.max(bestAsk + 0.005, pendingTrade.price), pendingTrade.worstCasePrice)
+            }
+
+            // 3. SUBMIT ORDER
+            const payload = {
+                tokenID: pendingTrade.tokenId,
+                price: parseFloat(finalPrice.toFixed(4)),
+                side: 'BUY',
+                size: pendingTrade.shares,
+            }
+
+            const generateNonce = () => Date.now() + Math.floor(Math.random() * 1000)
+
+            let order = await client.createAndPostOrder({
+                ...payload,
+                nonce: generateNonce()
             })
 
-            // Retry logic for 'invalid nonce' which can happen with rapid updates
+            // Retry for Nonce (Single Retry)
             if (order && order.error && order.error.includes('nonce')) {
-                console.log("Retrying order due to nonce error...")
-                await new Promise(r => setTimeout(r, 500)) // Wait 500ms
-                return executeStrategy(outcomeIndex, strategy) // Recursively retry once
+                console.warn("Nonce collision detected in confirmTrade. Retrying in 500ms...")
+                await new Promise(r => setTimeout(r, 500))
+
+                order = await client.createAndPostOrder({
+                    ...payload,
+                    nonce: generateNonce()
+                })
             }
 
-            console.log("Order Placed Response:", order)
+            // Check again after (potential) retry
+            if (order && order.error && order.error.includes('nonce')) {
+                throw new Error("Nonce Invalid (Retry Failed). System clock may be desynced.")
+            }
 
             if (order && (order.error || (order.status && order.status >= 400))) {
-                const errorMsg = order.error || order.data?.error || "Unknown error"
-                throw new Error(errorMsg)
+                throw new Error(order.error || order.data?.error || "Order Submission Failed")
             }
+
+            console.log("Trade Submitted:", order)
+            setActiveOrderId(order.orderID)
+            setOrderStatus('OPEN')
 
             toast.update(toastId, {
-                render: `${strategy} Order Placed @ ${price.toFixed(3)}! ${strategy === 'AGGRESSIVE' ? 'Check fills.' : 'Waiting for fill...'}`,
+                render: `Order Open! ID: ${order.orderID?.slice(0, 8)}...`,
                 type: "success",
                 isLoading: false,
-                autoClose: 3000
+                autoClose: 2000
             })
 
-            // --- AUTO CANCEL LOGIC ---
-            // Passive: 5s, Aggressive: 1s
-            const timeoutMs = strategy === 'PASSIVE' ? 5000 : 1000
-
-            if (order && order.orderID) {
-                setTimeout(async () => {
-                    try {
-                        // We can attempt to cancel. If already filled, it might fail (which is fine).
-                        // Note: Current CLOB client might not expose 'cancel'. 
-                        // We assume client.cancel(id) exists or we use cancelAll as fallback if needed.
-                        // Looking at Polybot docs/usage, usually client.cancelOrder(id) or client.cancel(id).
-                        // We will try cancelOrder first.
-                        console.log(`[Strategy] Auto-cancelling ${strategy} order...`)
-                        await client.cancel(order.orderID)
-                        toast.info(`${strategy} Order Cancelled (Timeout)`)
-                    } catch (e) {
-                        // console.warn("Auto-cancel failed (likely filled):", e)
-                    }
-                }, timeoutMs)
-            }
+            // 4. AUTO-CANCEL SAFEGUARDS
+            const timeoutMs = pendingTrade.strategy === 'PASSIVE' ? 30000 : 2000 // 30s Passive, 2s Aggressive
+            setTimeout(() => {
+                cancelActiveOrder(order.orderID) // Attempt auto-cancel
+            }, timeoutMs)
 
         } catch (err) {
-            console.error("Trade Failed:", err)
+            console.error("Trade Error:", err)
+            setOrderStatus('IDLE')
             toast.update(toastId, {
                 render: `Failed: ${err.message}`,
                 type: "error",
@@ -460,7 +505,24 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                 autoClose: 5000
             })
         } finally {
-            setOrdering(false)
+            setPendingTrade(null)
+        }
+    }
+
+    const cancelActiveOrder = async (idToCancel) => {
+        const id = idToCancel || activeOrderId
+        if (!id || !client) return
+
+        try {
+            await client.cancel(id)
+            toast.info("Active Order Cancelled")
+            setOrderStatus('CANCELLED')
+            setTimeout(() => setOrderStatus('IDLE'), 2000)
+            setActiveOrderId(null)
+        } catch (e) {
+            console.warn("Cancel failed (maybe filled?):", e)
+            setOrderStatus('IDLE') // Assume done if cancel fails
+            setActiveOrderId(null)
         }
     }
 
@@ -738,16 +800,16 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                             {/* Strategy Buttons */}
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
                                 <button
-                                    disabled={ordering}
-                                    onClick={() => executeStrategy(0, 'PASSIVE')}
-                                    style={{ background: '#334155', border: '1px solid #10b981', color: '#10b981', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem' }}
+                                    disabled={orderStatus !== 'IDLE'}
+                                    onClick={() => initiateTrade(0, 'PASSIVE')}
+                                    style={{ background: '#334155', border: '1px solid #10b981', color: '#10b981', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem', opacity: orderStatus !== 'IDLE' ? 0.5 : 1 }}
                                 >
                                     🛡️ Bid (Passive)
                                 </button>
                                 <button
-                                    disabled={ordering}
-                                    onClick={() => executeStrategy(0, 'AGGRESSIVE')}
-                                    style={{ background: '#10b981', border: 'none', color: '#0f172a', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.75rem' }}
+                                    disabled={orderStatus !== 'IDLE'}
+                                    onClick={() => initiateTrade(0, 'AGGRESSIVE')}
+                                    style={{ background: '#10b981', border: 'none', color: '#0f172a', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.75rem', opacity: orderStatus !== 'IDLE' ? 0.5 : 1 }}
                                 >
                                     ⚡ Buy (Fast)
                                 </button>
@@ -807,16 +869,16 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                             {/* Strategy Buttons */}
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
                                 <button
-                                    disabled={ordering}
-                                    onClick={() => executeStrategy(1, 'PASSIVE')}
-                                    style={{ background: '#334155', border: '1px solid #ef4444', color: '#ef4444', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem' }}
+                                    disabled={orderStatus !== 'IDLE'}
+                                    onClick={() => initiateTrade(1, 'PASSIVE')}
+                                    style={{ background: '#334155', border: '1px solid #ef4444', color: '#ef4444', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem', opacity: orderStatus !== 'IDLE' ? 0.5 : 1 }}
                                 >
                                     🛡️ Bid (Passive)
                                 </button>
                                 <button
-                                    disabled={ordering}
-                                    onClick={() => executeStrategy(1, 'AGGRESSIVE')}
-                                    style={{ background: '#ef4444', border: 'none', color: 'white', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.75rem' }}
+                                    disabled={orderStatus !== 'IDLE'}
+                                    onClick={() => initiateTrade(1, 'AGGRESSIVE')}
+                                    style={{ background: '#ef4444', border: 'none', color: 'white', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.75rem', opacity: orderStatus !== 'IDLE' ? 0.5 : 1 }}
                                 >
                                     ⚡ Buy (Fast)
                                 </button>
@@ -826,7 +888,51 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                     </div>
                 </div>
             </div>
-        </div>
+
+
+            {/* TRADING CONFIRMATION MODAL */}
+            <ConfirmModal
+                isOpen={confirmModalOpen}
+                title="Confirm Buy Order"
+                onConfirm={confirmTrade}
+                onCancel={() => setConfirmModalOpen(false)}
+                confirmText={orderStatus === 'SUBMITTING' ? "Submitting..." : "✅ Confirm Buy"}
+            >
+                {pendingTrade && (
+                    <div style={{ fontSize: '0.9rem', color: '#cbd5e1' }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '12px' }}>
+                            <div>Outcome:</div>
+                            <div style={{ textAlign: 'right', fontWeight: 'bold', color: 'white' }}>{pendingTrade.outcomeName}</div>
+
+                            <div>Side:</div>
+                            <div style={{ textAlign: 'right', fontWeight: 'bold', color: '#10b981' }}>BUY</div>
+
+                            <div>Strategy:</div>
+                            <div style={{ textAlign: 'right' }}>{pendingTrade.strategy === 'PASSIVE' ? '🛡️ Passive (Maker)' : '⚡ Fast (Taker)'}</div>
+
+                            <div>Size:</div>
+                            <div style={{ textAlign: 'right' }}>{pendingTrade.shares.toFixed(2)} Shares</div>
+
+                            <div>Est. Price:</div>
+                            <div style={{ textAlign: 'right' }}>${pendingTrade.price.toFixed(3)}</div>
+
+                            <div>Cost:</div>
+                            <div style={{ textAlign: 'right', color: '#fbbf24' }}>${pendingTrade.estCost.toFixed(2)}</div>
+
+                            {pendingTrade.strategy === 'AGGRESSIVE' && (
+                                <>
+                                    <div style={{ color: '#ef4444' }}>Limit Price:</div>
+                                    <div style={{ textAlign: 'right', color: '#ef4444' }}>${pendingTrade.worstCasePrice.toFixed(3)}</div>
+                                </>
+                            )}
+                        </div>
+                        <div style={{ fontSize: '0.75rem', color: '#94a3b8', fontStyle: 'italic', background: '#1e293b', padding: '8px', borderRadius: '4px' }}>
+                            ⚠️ Price may change. Order rejects if price exceeds limit.
+                        </div>
+                    </div>
+                )}
+            </ConfirmModal>
+        </div >
     )
 }
 
