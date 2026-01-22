@@ -416,28 +416,52 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
     }
 
     // STEP B: Confirm & Execute (Double-Check & Submit)
+    const isSubmittingRef = useRef(false)
+
+    // Unlock on unmount to be safe
+    useEffect(() => {
+        return () => { isSubmittingRef.current = false }
+    }, [])
+
     const confirmTrade = async () => {
         if (!pendingTrade || !client) return
+
+        // 1. MUTEX LOCK
+        if (isSubmittingRef.current) return
+        isSubmittingRef.current = true
+
         setConfirmModalOpen(false)
         setOrderStatus('SUBMITTING')
         const toastId = toast.loading(`Submitting ${pendingTrade.side} Order...`)
 
         try {
-            // 1. SAFETY CHECK: Re-verify Market Conditions
+            // 2. SAFETY CHECK: Re-verify Market Conditions
             const book = await client.getOrderBook(pendingTrade.tokenId)
-            // Fix: handle empty books
-            const bestBid = book.bids && book.bids.length > 0 ? parseFloat(book.bids[0].price) : 0
-            const bestAsk = book.asks && book.asks.length > 0 ? parseFloat(book.asks[0].price) : 1
+
+            const hasBids = book.bids && book.bids.length > 0
+            const hasAsks = book.asks && book.asks.length > 0
+
+            const bestBid = hasBids ? parseFloat(book.bids[0].price) : 0
+            const bestAsk = hasAsks ? parseFloat(book.asks[0].price) : 999
 
             let finalPrice = pendingTrade.price
 
             if (pendingTrade.strategy === 'PASSIVE') {
-                // For Passive, we stick to our price. 
-                // Optionally check if we are crossing the spread (if bid > ask now?) - unlikely but possible.
+                // Passive: We just need to know if we are 'crossing' the book? 
+                // Actually passive orders just sit there. We don't strictly care about Ask unless we want to match it.
             } else {
-                // TAKING: Check if Best Ask is still within worstCasePrice
+                // AGGRESSIVE (Taking Liquidity):
+                if (!hasAsks) {
+                    throw new Error("Liquidity dried up! No sellers available.")
+                }
+
+                // Check if Best Ask is still within worstCasePrice
                 if (bestAsk > pendingTrade.worstCasePrice) {
-                    throw new Error(`Price moved! Ask is ${bestAsk}, limit was ${pendingTrade.worstCasePrice.toFixed(3)}.`)
+                    // Graceful Exit - Warn user instead of throwing error
+                    toast.dismiss(toastId)
+                    toast.warn(`Price changed: ${bestAsk} > Limit ${pendingTrade.worstCasePrice.toFixed(3)}. Review and retry.`)
+                    setOrderStatus('IDLE')
+                    return
                 }
                 // Optimize: If Ask is lower/same, take it, but max at worstCase
                 finalPrice = Math.min(Math.max(bestAsk + 0.005, pendingTrade.price), pendingTrade.worstCasePrice)
@@ -451,28 +475,15 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                 size: pendingTrade.shares,
             }
 
-            const generateNonce = () => Date.now() + Math.floor(Math.random() * 1000)
+            // 4. SUBMIT ORDER (SINGLE ATTEMPT - NO RETRIES)
+            const nonce = Date.now() + Math.floor(Math.random() * 1000)
 
-            let order = await client.createAndPostOrder({
+            const order = await client.createAndPostOrder({
                 ...payload,
-                nonce: generateNonce()
+                nonce: nonce
             })
 
-            // Retry for Nonce (Single Retry)
-            if (order && order.error && order.error.includes('nonce')) {
-                console.warn("Nonce collision detected in confirmTrade. Retrying in 500ms...")
-                await new Promise(r => setTimeout(r, 500))
-
-                order = await client.createAndPostOrder({
-                    ...payload,
-                    nonce: generateNonce()
-                })
-            }
-
-            // Check again after (potential) retry
-            if (order && order.error && order.error.includes('nonce')) {
-                throw new Error("Nonce Invalid (Retry Failed). System clock may be desynced.")
-            }
+            // Strict Error Handling (NO RETRIES)
 
             if (order && (order.error || (order.status && order.status >= 400))) {
                 throw new Error(order.error || order.data?.error || "Order Submission Failed")
@@ -505,6 +516,8 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                 autoClose: 5000
             })
         } finally {
+            // RELEASE MUTEX LOCK
+            isSubmittingRef.current = false
             setPendingTrade(null)
         }
     }

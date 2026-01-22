@@ -6,6 +6,7 @@ import MarketChart from './components/Charts/MarketChart'
 import MiniChart from './components/Charts/MiniChart'
 import UserPortfolio from './UserPortfolio'
 import FocusedMarketView from './components/FocusedMarketView'
+import DebugPanel from './components/Debug/DebugPanel'
 
 function App() {
   const [markets, setMarkets] = useState([])
@@ -315,6 +316,7 @@ function App() {
           onClose={() => setModalMarket(null)}
         />
       )}
+      <DebugPanel />
     </div>
   )
 }

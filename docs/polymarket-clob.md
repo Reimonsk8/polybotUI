@@ -12,7 +12,33 @@
 - **Description**: Returns the active bids and asks for a specific outcome token.
 - **Rules**: 
     - Always check if book exists before ordering.
-    - 404 means the token is not currently tradable or valid.
+    - **404 Error** means "No orderbook exists for the requested token id"
+    
+**Understanding 404 Errors:**
+
+A 404 response typically occurs when:
+
+1. **Market is closed/resolved** ✅ (Most common - orderbooks are removed after resolution)
+2. **Invalid token ID** ❌ (Token ID is incorrect or malformed)
+3. **Market not yet active** ⏳ (Orderbook hasn't been created yet)
+
+**How to Handle:**
+```javascript
+try {
+  const book = await client.getOrderBook(tokenId)
+  // Market is active, proceed with trading
+} catch (e) {
+  if (e.status === 404 || e.data?.error?.includes("No orderbook exists")) {
+    // Market is resolved - switch to redemption flow
+    toast.warn("Market has ended. Please redeem your shares.")
+    // await client.redeemPositions({ conditionId, indexSets: [1, 2] })
+  }
+}
+```
+
+**Verification:**
+- Check if token exists: `GET https://gamma-api.polymarket.com/markets?clob_token_ids=YOUR_TOKEN_ID`
+- Check market status: Look for `closed: true` in the response
 
 ### Place Order
 **POST** `/order`

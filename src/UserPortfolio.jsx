@@ -67,7 +67,7 @@ const UserPortfolio = ({ onStateChange }) => {
 
                             // If we have a private key, recreate the signer
                             if (session.privateKey) {
-                                const rpcUrl = "https://polygon-rpc.com"
+                                const rpcUrl = "https://polygon.drpc.org"
                                 const provider = new ethers.providers.JsonRpcProvider(rpcUrl)
                                 signer = new ethers.Wallet(session.privateKey, provider)
                             }
@@ -180,13 +180,26 @@ const UserPortfolio = ({ onStateChange }) => {
     // Propagate State to Parent (App.jsx) for Trading Views
     useEffect(() => {
         if (onStateChange) {
+            // Get API credentials from environment (used for both L2 auth and gasless trading)
+            const builderCreds = {
+                key: import.meta.env.VITE_API_KEY,
+                secret: import.meta.env.VITE_API_SECRET,
+                passphrase: import.meta.env.VITE_API_PASSPHRASE
+            }
+
+            // Only include builder creds if all fields are present
+            const hasBuilderCreds = builderCreds.key && builderCreds.secret && builderCreds.passphrase
+
             onStateChange({
                 client,
                 address: proxyAddress || address, // Use proxy if available (L2), else L1
-                isConnected: !!address
+                isConnected: !!address,
+                privateKey: savedPrivateKey, // For gasless trading
+                builderCreds: hasBuilderCreds ? builderCreds : null, // For gasless trading (same as API creds)
+                gaslessEnabled: hasBuilderCreds && !!savedPrivateKey
             })
         }
-    }, [client, address, proxyAddress, onStateChange])
+    }, [client, address, proxyAddress, savedPrivateKey, onStateChange])
 
     const fetchPortfolioValue = async (userAddress) => {
         try {
@@ -446,7 +459,7 @@ const UserPortfolio = ({ onStateChange }) => {
             let key = privateKeyInput.trim()
             if (!key.startsWith('0x')) key = '0x' + key
 
-            const rpcUrl = "https://polygon-rpc.com"
+            const rpcUrl = "https://polygon.drpc.org"
             const provider = new ethers.providers.JsonRpcProvider(rpcUrl)
             const wallet = new ethers.Wallet(key, provider)
             const userAddress = await wallet.getAddress()
@@ -548,7 +561,7 @@ const UserPortfolio = ({ onStateChange }) => {
             let key = privateKeyInput.trim()
             if (!key.startsWith('0x')) key = '0x' + key
 
-            const rpcUrl = "https://polygon-rpc.com"
+            const rpcUrl = "https://polygon.drpc.org"
             const provider = new ethers.providers.JsonRpcProvider(rpcUrl)
             const wallet = new ethers.Wallet(key, provider)
             const userAddress = await wallet.getAddress()
@@ -613,14 +626,23 @@ const UserPortfolio = ({ onStateChange }) => {
 
     // Calculate total value: (Sum of Positions) + (Cash Balance)
     // We use this if the direct API value is unavailable or fails
-    const positionsValue = positions.reduce((sum, p) => sum + (p.curPrice * p.size), 0)
+    const positionsValue = positions.reduce((sum, p) => {
+        const price = parseFloat(p.curPrice) || 0
+        const size = parseFloat(p.size) || 0
+        const value = price * size
+        return sum + (isNaN(value) ? 0 : value)
+    }, 0)
+
+    // Add cash balance to positions value for fallback
+    const cashValue = cashBalance !== null && !isNaN(cashBalance) ? parseFloat(cashBalance) : 0
+    const fallbackValue = positionsValue + cashValue
 
     // Total Value Logic:
     // 1. Try to use the explicit portfolioValue from API
     // 2. Fallback to: Positions Value + Cash Balance
     const displayValue = (portfolioValue !== null && !isNaN(portfolioValue))
         ? portfolioValue
-        : positionsValue
+        : (!isNaN(fallbackValue) ? fallbackValue : null)
 
     if (!address) {
         return (
@@ -653,7 +675,20 @@ const UserPortfolio = ({ onStateChange }) => {
 
 
             {console.log('[UserPortfolio] Rendering with:', { address, proxyAddress, using: proxyAddress || address })}
-            <PortfolioTabs userAddress={proxyAddress || address} client={client} apiCreds={apiCreds} />
+            <PortfolioTabs
+                userAddress={proxyAddress || address}
+                client={client}
+                apiCreds={apiCreds}
+                signatureType={signatureType}
+                proxyAddress={proxyAddress}
+                cashBalance={cashBalance}
+                privateKey={savedPrivateKey}
+                builderCreds={{
+                    key: import.meta.env.VITE_API_KEY,
+                    secret: import.meta.env.VITE_API_SECRET,
+                    passphrase: import.meta.env.VITE_API_PASSPHRASE
+                }}
+            />
         </div>
     )
 }

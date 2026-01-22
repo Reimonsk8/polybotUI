@@ -1,11 +1,22 @@
-import { useState, useEffect } from 'react'
+import React, { useState, useEffect } from 'react'
 import './PortfolioTabs.css'
 import { fetchActivityLog as fetchActivityData } from './ActivityLogFetcher'
 import { Side, OrderType } from '@polymarket/clob-client'
 import { toast } from 'react-toastify'
 import ConfirmModal from './ConfirmModal'
+import { placeMarketOrder, checkMarketLiquidity } from '../../utils/marketOrders'
+import { initRelayerClient, redeemPositionsGasless } from '../../utils/relayerClient'
 
-const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
+const PortfolioTabs = ({
+    userAddress,
+    client,
+    apiCreds,
+    signatureType = 0,
+    proxyAddress = null,
+    cashBalance = null,
+    privateKey = null,
+    builderCreds = null
+}) => {
     const [activeTab, setActiveTab] = useState('active') // 'active', 'closed', 'activity'
     const [activeBets, setActiveBets] = useState([])
     const [closedPositions, setClosedPositions] = useState([])
@@ -14,6 +25,9 @@ const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
     const [liveUpdates, setLiveUpdates] = useState(false)
     const [wsConnected, setWsConnected] = useState(false)
     const [hasFetched, setHasFetched] = useState(false)
+
+    // Track resolved markets to avoid repeated 404s
+    const [resolvedMarkets, setResolvedMarkets] = useState(new Set())
 
     // AUTO-SELL STATE
     const [autoSellEnabled, setAutoSellEnabled] = useState(false)
@@ -109,14 +123,31 @@ const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
                                 // OPTION A: Use Client OrderBook (Best)
                                 if (client) {
                                     try {
+                                        // Skip if we already know it's resolved
+                                        if (resolvedMarkets.has(pos.conditionId) || resolvedMarkets.has(pos.market)) {
+                                            // Keeping existing price or 0 if resolved
+                                            return pos
+                                        }
+
                                         const book = await client.getOrderBook(pos.asset)
                                         if (book && book.bids && book.bids.length > 0) {
                                             livePrice = parseFloat(book.bids[0].price)
                                             priceFound = !isNaN(livePrice)
                                         }
                                     } catch (err) {
-                                        // Ignore 404 (No matching orderbook)
-                                        if (err.message && !err.message.includes('404')) {
+                                        // Ignore 404 (No matching orderbook) - market may be resolved
+                                        const statusCode = err.status || err.response?.status || err.code
+                                        const is404 = statusCode === 404 || statusCode === '404'
+
+                                        // Also check for "No orderbook exists" message
+                                        const errorMsg = err.message || err.data?.error || ''
+                                        const isNoOrderbook = errorMsg.toLowerCase().includes("no orderbook exists")
+
+                                        if (is404 || isNoOrderbook) {
+                                            // Mark as resolved so we don't try again
+                                            setResolvedMarkets(prev => new Set(prev).add(pos.conditionId))
+                                        } else {
+                                            // Only log non-404 errors (network issues, etc.)
                                             // console.warn('OrderBook Error:', err)
                                         }
                                     }
@@ -245,27 +276,50 @@ const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
                             continue
                         }
 
-                        // 3. SAFE PRICE LOGIC
-                        // Clamp to [0.01, 0.99]
-                        let sellPrice = bestBid
-                        if (sellPrice >= 1) sellPrice = 0.99
-                        if (sellPrice <= 0) sellPrice = 0.01
+                        // 3. USE MARKET ORDER (FOK) for fastest execution - GASLESS if credentials available!
+                        console.log(`[Auto Sell] Placing ${builderCreds ? 'GASLESS' : 'STANDARD'} MARKET order (FOK) for ${bet.size} shares`)
 
-                        console.log(`[Auto Sell] Execution Price: ${sellPrice} for ${bet.size} shares`)
+                        try {
+                            // Place market order - executes immediately (gasless if builder creds available)
+                            const marketOrderResult = await placeMarketOrder(
+                                client,
+                                bet.asset,
+                                "SELL",
+                                bet.size,
+                                {
+                                    useGasless: true,
+                                    privateKey: privateKey,
+                                    builderCreds: builderCreds
+                                }
+                            )
 
-                        // 4. SUBMIT ORDER
-                        const generateNonce = () => Date.now() + Math.floor(Math.random() * 1000)
+                            if (marketOrderResult.success) {
+                                console.log('[Auto Sell] Market order executed:', marketOrderResult)
+                                const gaslessTag = marketOrderResult.gasless ? ' (GASLESS ⚡)' : ''
+                                toast.success(`Strategy Triggered: Sold ${bet.title} @ $${marketOrderResult.price.toFixed(4)} (${reason}) - Market Order${gaslessTag}`)
+                            }
+                        } catch (marketErr) {
+                            // Fallback to limit order if market order fails
+                            console.warn("[Auto Sell] Market order failed, using limit order:", marketErr)
 
-                        const order = await client.createAndPostOrder({
-                            tokenID: bet.asset,
-                            price: parseFloat(sellPrice.toFixed(4)),
-                            side: Side.SELL,
-                            size: bet.size,
-                            nonce: generateNonce()
-                        })
+                            // SAFE PRICE LOGIC - Clamp to [0.01, 0.99]
+                            let sellPrice = bestBid
+                            if (sellPrice >= 1) sellPrice = 0.99
+                            if (sellPrice <= 0) sellPrice = 0.01
 
-                        console.log('[Auto Sell] Success:', order)
-                        toast.success(`Strategy Triggered: Sold ${bet.title} @ ${sellPrice} (${reason})`)
+                            const generateNonce = () => Date.now() + Math.floor(Math.random() * 1000)
+
+                            const order = await client.createAndPostOrder({
+                                tokenID: bet.asset,
+                                price: parseFloat(sellPrice.toFixed(4)),
+                                side: Side.SELL,
+                                size: bet.size,
+                                nonce: generateNonce()
+                            })
+
+                            console.log('[Auto Sell] Limit order placed:', order)
+                            toast.success(`Strategy Triggered: Sold ${bet.title} @ ${sellPrice} (${reason}) - Limit Order`)
+                        }
 
                     } catch (err) {
                         console.error('[Auto Sell] Failed:', err)
@@ -500,87 +554,354 @@ const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
         let sellPrice = bet.curPrice
 
         try {
-            // 1. MANDATORY: Fetch Fresh Best Bid (Sell Price)
-            // If the orderbook 404s or is empty, we CANNOT sell safely.
+            // 1. DETECT MARKET STATUS: Active (Sell) vs Resolved (Redeem)
+            let marketStatus = 'UNKNOWN'
             let bestBid = 0
 
             if (bet.asset) {
                 try {
+                    // Check if we already know it's resolved
+                    if (resolvedMarkets.has(bet.conditionId)) {
+                        marketStatus = 'RESOLVED'
+                        // Skip fetching book
+                        throw { status: 404, message: "Known resolved" }
+                    }
+
                     const book = await client.getOrderBook(bet.asset)
 
                     // Logic: To SELL, we match the BID side.
                     // If no bids, there is no liquidity to sell into.
                     if (book && book.bids && book.bids.length > 0) {
                         bestBid = parseFloat(book.bids[0].price)
-                        console.log(`[Sell] Found fresh best bid: ${bestBid}`)
+                        marketStatus = 'ACTIVE'
+                        console.log(`[Sell] Market is ACTIVE. Best bid: ${bestBid}`)
                     } else {
-                        throw new Error("No buyers (Bids) available on the orderbook.")
+                        // Empty book but API returned → Could be illiquid OR resolved
+                        // Check if market has ended to determine if it's resolved
+                        const marketEndDate = bet.marketData?.endDate || bet.endDate
+                        const isMarketEnded = marketEndDate && new Date(marketEndDate) < new Date()
+
+                        if (isMarketEnded) {
+                            // Market has ended and orderbook is empty → Likely resolved
+                            marketStatus = 'RESOLVED'
+                            console.log(`[Sell] Market has ended (endDate: ${marketEndDate}) and orderbook is empty → RESOLVED`)
+                        } else {
+                            // Market might still be active but illiquid
+                            marketStatus = 'ILLIQUID'
+                            console.log(`[Sell] Market returned empty orderbook (illiquid or may be resolved)`)
+                        }
                     }
                 } catch (e) {
                     console.error("OrderBook fetch failed:", e)
-                    // If 404 or other error, we must abort.
-                    // "No orderbook exists" means token is not tradable.
-                    toast.error(`Cannot Sell: Market data unavailable or illiquid. (${e.message})`)
-                    return
+
+                    // CLOB Client error can be in multiple formats:
+                    // 1. Direct error object: {status: 404, data: {error: "..."}}
+                    // 2. Axios-style: {response: {status: 404, data: {error: "..."}}}
+                    // 3. Error instance: new Error("...") with properties attached
+
+                    // Check status code in multiple possible locations
+                    const statusCode = e.status || e.response?.status || e.code
+                    const is404 = statusCode === 404 || statusCode === '404'
+
+                    // Check error message in multiple possible locations
+                    const errorMsg = e.message ||
+                        e.data?.error ||
+                        e.error ||
+                        e.response?.data?.error ||
+                        (typeof e.data === 'string' ? e.data : '') ||
+                        ''
+
+                    // Check for "no orderbook" indicators
+                    const isNoOrderbook = errorMsg.toLowerCase().includes("no orderbook exists") ||
+                        (errorMsg.toLowerCase().includes("orderbook") && errorMsg.toLowerCase().includes("does not exist")) ||
+                        (errorMsg.toLowerCase().includes("orderbook") && errorMsg.toLowerCase().includes("not found"))
+
+                    console.log("[Debug] Error details:", {
+                        statusCode,
+                        is404,
+                        errorMsg,
+                        isNoOrderbook,
+                        errorKeys: Object.keys(e)
+                    })
+
+                    if (is404 || isNoOrderbook) {
+                        marketStatus = 'RESOLVED'
+                        console.log(`[Redeem] Market is RESOLVED (404 or no orderbook). Switching to redeem flow.`)
+                        // Track it to prevent future 404 fetches
+                        setResolvedMarkets(prev => new Set(prev).add(bet.conditionId))
+                    } else {
+                        // Other error (network, etc)
+                        const displayError = errorMsg || `Error ${statusCode || 'unknown'}`
+                        toast.error(`Cannot process: ${displayError}`)
+                        return
+                    }
                 }
             } else {
                 toast.error("Invalid position data (missing asset ID).")
                 return
             }
 
-            // Price Logic: Sell at Best Bid
-            // Clamp to valid range
-            if (bestBid >= 1) bestBid = 0.99
-            if (bestBid <= 0) bestBid = 0.01 // Should have been caught by "No buyers" check theoretically
 
-            let sellPrice = bestBid
+            // 2. EXECUTE APPROPRIATE ACTION
+            if (marketStatus === 'ILLIQUID') {
+                // Market exists but has no buyers
+                // Empty orderbook often means market is resolved, so offer redemption
+                toast.info("⚠️ No buyers available. Market may be resolved. Attempting redemption...")
 
-            console.log(`[Sell] Selling ${sizeToSell} of ${bet.asset} @ ${sellPrice}`)
-
-            // 2. Place Order (Create AND Post) with Robust Nonce
-            const generateNonce = () => Date.now() + Math.floor(Math.random() * 1000)
-
-            const payload = {
-                tokenID: bet.asset,
-                price: parseFloat(sellPrice.toFixed(4)), // Ensure precision
-                side: Side.SELL,
-                size: sizeToSell,
+                // Automatically try redemption since empty orderbook often indicates resolved market
+                // If redemption fails, we'll show an appropriate error
+                marketStatus = 'RESOLVED' // Fall through to redemption flow
             }
 
-            let response = await client.createAndPostOrder({
-                ...payload,
-                nonce: generateNonce()
-            })
+            if (marketStatus === 'RESOLVED') {
+                // REDEEM FLOW (Market has ended)
+                toast.info("🎯 Market has resolved. Initiating redemption...")
 
-            // Retry for Nonce (Single Retry)
-            if (response && response.error && response.error.includes('nonce')) {
-                console.warn("Nonce collision on Sell. Retrying in 500ms...")
-                await new Promise(r => setTimeout(r, 500))
+                // Import ethers early so it's available in catch block
+                const { ethers } = await import('ethers')
 
-                response = await client.createAndPostOrder({
+                try {
+                    // Check if we have the required data
+                    if (!bet.conditionId) {
+                        toast.error("❌ Cannot redeem: Missing condition ID. Please contact support.")
+                        console.error("Missing conditionId for position:", bet)
+                        return
+                    }
+
+                    console.log(`[Redeem] Starting redemption for conditionId: ${bet.conditionId}`)
+                    console.log(`[Redeem] Position size: ${bet.size}, Asset: ${bet.asset}`)
+
+                    // CTF Contract Details (Polygon)
+                    const CTF_ADDRESS = "0x4d97dcd97ec945f40cf65f87097ace5ea0476045"
+                    const USDCe_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+
+                    // Get the signer from the CLOB client
+                    const signer = client.signer
+                    if (!signer) {
+                        toast.error("❌ No wallet signer available. Please reconnect.")
+                        return
+                    }
+
+                    // Create CTF contract interface
+                    const ctfInterface = new ethers.utils.Interface([
+                        "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint[] indexSets)"
+                    ])
+
+                    // Encode the redemption call
+                    const redeemData = ctfInterface.encodeFunctionData("redeemPositions", [
+                        USDCe_ADDRESS,                    // collateralToken
+                        ethers.constants.HashZero,        // parentCollectionId (null for Polymarket)
+                        bet.conditionId,                  // conditionId
+                        [1, 2]                            // indexSets: redeem both YES and NO (only winners pay out)
+                    ])
+
+                    // GASLESS REDEMPTION (Priority)
+                    if (builderCreds && privateKey) {
+                        try {
+                            console.log('[Redeem] Attempting GASLESS redemption via Relayer...')
+                            toast.info("⚡ Initiating Gasless Redemption...")
+
+                            const { relayClient } = await initRelayerClient(privateKey, builderCreds)
+                            const result = await redeemPositionsGasless(relayClient, bet.conditionId)
+
+                            if (result.success) {
+                                toast.success(`✅ Gasless Redemption successful! Tx: ${result.transactionHash.slice(0, 10)}...`)
+                                console.log('[Redeem] Gasless success:', result)
+                                setTimeout(() => window.location.reload(), 2000)
+                                return
+                            }
+                        } catch (gaslessErr) {
+                            console.error('[Redeem] Gasless failed, falling back to standard:', gaslessErr)
+                            toast.warn("Gasless redemption failed, trying standard method...")
+                            // Fall through to standard logic below
+                        }
+                    }
+
+                    // STANDARD REDEMPTION (Direct via Ethers)
+                    console.log(`[Redeem] Sending standard redemption transaction...`)
+
+                    // Try to estimate gas with retry logic (handle rate limiting)
+                    let gasLimit = null
+                    let retries = 0
+                    const maxRetries = 3
+
+                    while (retries < maxRetries && !gasLimit) {
+                        try {
+                            const estimate = await signer.estimateGas({
+                                to: CTF_ADDRESS,
+                                data: redeemData,
+                                value: 0
+                            })
+                            gasLimit = estimate
+                            console.log(`[Redeem] Gas estimated: ${gasLimit.toString()}`)
+                        } catch (estimateError) {
+                            retries++
+                            const errorMsg = estimateError.message || ''
+
+                            // Check if it's a rate limit error
+                            if (errorMsg.includes('rate limit') || errorMsg.includes('Too many requests')) {
+                                const waitTime = Math.min(1000 * Math.pow(2, retries), 10000) // Exponential backoff, max 10s
+                                console.warn(`[Redeem] Rate limited, waiting ${waitTime}ms before retry ${retries}/${maxRetries}...`)
+                                await new Promise(resolve => setTimeout(resolve, waitTime))
+                                continue
+                            }
+
+                            // If not rate limit and not last retry, continue
+                            if (retries < maxRetries) {
+                                const waitTime = 1000 * retries
+                                console.warn(`[Redeem] Gas estimation failed, retrying in ${waitTime}ms...`)
+                                await new Promise(resolve => setTimeout(resolve, waitTime))
+                                continue
+                            }
+
+                            // Last retry failed - use manual gas limit
+                            console.warn(`[Redeem] Gas estimation failed after ${maxRetries} retries, using manual gas limit`)
+                            gasLimit = ethers.BigNumber.from(300000) // Safe manual limit for redemption (~300k gas)
+                        }
+                    }
+
+                    // Send the transaction with gas limit (estimated or manual)
+                    const txParams = {
+                        to: CTF_ADDRESS,
+                        data: redeemData,
+                        value: 0
+                    }
+
+                    // Add gas limit if we have one (estimated or manual)
+                    if (gasLimit) {
+                        txParams.gasLimit = gasLimit
+                        console.log(`[Redeem] Using gas limit: ${gasLimit.toString()}`)
+                    }
+
+                    const tx = await signer.sendTransaction(txParams)
+
+                    toast.loading(`⏳ Redeeming... Tx: ${tx.hash.slice(0, 10)}...`, { autoClose: false })
+                    console.log(`[Redeem] Transaction sent: ${tx.hash}`)
+
+                    // Wait for confirmation
+                    const receipt = await tx.wait()
+
+                    if (receipt.status === 1) {
+                        toast.dismiss()
+                        toast.success(`✅ Redemption successful! Claimed your winnings.`)
+                        console.log(`[Redeem] Success! Receipt:`, receipt)
+
+                        // Refresh positions after redemption
+                        setTimeout(() => {
+                            window.location.reload()
+                        }, 2000)
+                    } else {
+                        toast.dismiss()
+                        toast.error(`❌ Redemption transaction failed.`)
+                        console.error(`[Redeem] Transaction failed:`, receipt)
+                    }
+
+                    return
+                } catch (redeemErr) {
+                    toast.dismiss()
+                    console.error("Redeem failed:", redeemErr)
+
+                    // Provide helpful error messages
+                    const errorMsg = redeemErr.message || redeemErr.reason || ''
+                    const errorMsgLower = errorMsg.toLowerCase()
+
+                    if (redeemErr.code === 'ACTION_REJECTED' || redeemErr.code === 4001) {
+                        toast.error("❌ Redemption cancelled by user.")
+                    } else if (
+                        errorMsgLower.includes("insufficient funds") ||
+                        errorMsgLower.includes("insufficient balance") ||
+                        errorMsgLower.includes("gas") && errorMsgLower.includes("insufficient") ||
+                        redeemErr.code === 'INSUFFICIENT_FUNDS' ||
+                        redeemErr.error?.code === 'INSUFFICIENT_FUNDS'
+                    ) {
+                        // Simple error message - no complex MATIC checking
+                        toast.error("❌ Insufficient MATIC for gas. Redemption requires MATIC. Please add MATIC to your wallet.")
+                    } else if (errorMsgLower.includes("user rejected") || errorMsgLower.includes("user denied")) {
+                        toast.error("❌ Redemption cancelled by user.")
+                    } else if (errorMsgLower.includes("replacement fee too low")) {
+                        toast.error("❌ Transaction pending. Please wait for the previous transaction to complete.")
+                    } else {
+                        toast.error(`❌ Redemption failed: ${errorMsg || 'Unknown error'}`)
+                    }
+                    return
+                }
+            }
+
+            // 3. SELL FLOW (Market is still active)
+            // Use MARKET ORDER (FOK) for fastest execution - GASLESS if credentials available!
+
+            console.log(`[Sell] Placing ${builderCreds ? 'GASLESS' : 'STANDARD'} MARKET order (FOK) for ${sizeToSell} shares of ${bet.asset}`)
+
+            try {
+                // Place market order - executes immediately at best bid or fails (gasless if builder creds available)
+                const marketOrderResult = await placeMarketOrder(
+                    client,
+                    bet.asset,
+                    "SELL",
+                    sizeToSell,
+                    {
+                        useGasless: true,
+                        privateKey: privateKey,
+                        builderCreds: builderCreds
+                    }
+                )
+
+                if (marketOrderResult.success) {
+                    const gaslessTag = marketOrderResult.gasless ? ' ⚡ GASLESS' : ''
+                    toast.success(`✅ Sold! Executed at $${marketOrderResult.price.toFixed(4)} (Market Order${gaslessTag})`)
+                    console.log("[Sell] Market order executed:", marketOrderResult)
+                } else {
+                    throw new Error("Market order failed")
+                }
+
+                // Refresh positions
+                setTimeout(fetchActiveBets, 1000)
+
+            } catch (marketErr) {
+                // Fallback to limit order if market order fails
+                console.warn("[Sell] Market order failed, falling back to limit order:", marketErr)
+
+                // Price Logic: Sell at Best Bid
+                if (bestBid >= 1) bestBid = 0.99
+                if (bestBid <= 0) bestBid = 0.01
+
+                const generateNonce = () => Date.now() + Math.floor(Math.random() * 1000)
+
+                const payload = {
+                    tokenID: bet.asset,
+                    price: parseFloat(bestBid.toFixed(4)),
+                    side: Side.SELL,
+                    size: sizeToSell,
+                }
+
+                let response = await client.createAndPostOrder({
                     ...payload,
                     nonce: generateNonce()
                 })
+
+                // Retry for Nonce (Single Retry)
+                if (response && response.error && response.error.includes('nonce')) {
+                    console.warn("Nonce collision on Sell. Retrying in 500ms...")
+                    await new Promise(r => setTimeout(r, 500))
+
+                    response = await client.createAndPostOrder({
+                        ...payload,
+                        nonce: generateNonce()
+                    })
+                }
+
+                if (response && (response.error || (response.status && response.status >= 400))) {
+                    throw new Error(response.error || response.data?.error || "Order Failed")
+                }
+
+                if (response && response.orderID) {
+                    toast.success(`Limit Order Placed! ID: ${response.orderID}`)
+                } else {
+                    toast.info("Order Submitted (Check Activity)")
+                }
+
+                setTimeout(fetchActiveBets, 1000)
             }
-
-            console.log("Sell Order Response:", response)
-
-            // Explicit Error Handling
-            if (response && (response.error || (response.status && response.status >= 400))) {
-                throw new Error(response.error || response.data?.error || "Order Failed")
-            }
-
-            if (response && response.orderID) {
-                toast.success(`Sell Order Placed! ID: ${response.orderID}`)
-            } else {
-                toast.info("Sell Order Submitted (Check Activity)")
-            }
-
-            console.log("Sell Order Placed:", response)
-            // toast.success(`Sell Order Placed! ID: ${response.orderID || 'Submitted'}`) // logic handled above
-
-            // Refresh
-            setTimeout(fetchActiveBets, 1000)
 
         } catch (err) {
             console.error("Sell Failed:", err)
