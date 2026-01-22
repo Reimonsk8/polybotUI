@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { ethers } from 'ethers'
 import { ClobClient } from '@polymarket/clob-client'
+import { toast } from 'react-toastify'
 import './components/Portfolio/Portfolio.css' // Import shared styles
 import LoginForm from './components/Auth/LoginForm'
 import UserHeader from './components/Portfolio/UserHeader'
@@ -125,7 +126,7 @@ const UserPortfolio = ({ onStateChange }) => {
             // Set new timeout for auto-logout
             inactivityTimer = setTimeout(() => {
                 disconnect()
-                alert('Session expired due to inactivity. Please log in again.')
+                toast.info('Session expired due to inactivity. Please log in again.')
             }, INACTIVITY_TIMEOUT)
         }
 
@@ -474,7 +475,11 @@ const UserPortfolio = ({ onStateChange }) => {
             })
             setSavedPrivateKey(privateKeyInput) // Update state so auto-save works later
 
+            toast.success("Wallet Connected Successfully!")
+
         } catch (err) {
+            console.error(err)
+            toast.error(err.message)
             setError(err.message)
         } finally {
             setLoading(false)
@@ -523,6 +528,8 @@ const UserPortfolio = ({ onStateChange }) => {
             fetchPortfolioValue(apiAddress)
 
         } catch (e) {
+            console.error(e)
+            toast.error(e.message)
             setError(e.message)
         } finally {
             setLoading(false)
@@ -558,6 +565,8 @@ const UserPortfolio = ({ onStateChange }) => {
             await performL2Login(wallet, userAddress, 'full', proxyAddressInput)
 
         } catch (err) {
+            console.error(err)
+            toast.error(err.message)
             setError(err.message)
         } finally {
             setLoading(false)

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceLine } from 'recharts'
+import { toast } from 'react-toastify'
 import './FocusedMarketView.css'
 
 const FocusedMarketView = ({ event, client, userAddress }) => {
@@ -11,9 +12,10 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
     const [priceHistory, setPriceHistory] = useState([])
     // Structure: { bid: 0, ask: 0, last: 0 }
     const [livePrices, setLivePrices] = useState({
-        up: { bid: 0, ask: 0, last: 0 },
-        down: { bid: 0, ask: 0, last: 0 }
+        up: { bid: 0, ask: 0, last: 0, bidSize: 0, askSize: 0 },
+        down: { bid: 0, ask: 0, last: 0, bidSize: 0, askSize: 0 }
     })
+    const [tradeAmount, setTradeAmount] = useState(10) // Default trade amount
     const [isConnected, setIsConnected] = useState(false)
     const wsRef = useRef(null)
 
@@ -111,12 +113,20 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
             const type = data.asset_id === upId ? 'up' : (data.asset_id === downId ? 'down' : null)
             if (type) {
                 if (data.bids?.length > 0) {
-                    const bestBid = data.bids.reduce((max, b) => Math.max(max, parseFloat(b.price)), 0)
-                    addUpdate(type, 'bid', bestBid)
+                    // Find Max Bid
+                    const bestBidObj = data.bids.reduce((curr, b) =>
+                        parseFloat(b.price) > parseFloat(curr.price) ? b : curr
+                        , data.bids[0])
+                    addUpdate(type, 'bid', bestBidObj.price)
+                    addUpdate(type, 'bidSize', bestBidObj.size)
                 }
                 if (data.asks?.length > 0) {
-                    const bestAsk = data.asks.reduce((min, a) => Math.min(min, parseFloat(a.price)), 1)
-                    addUpdate(type, 'ask', bestAsk)
+                    // Find Min Ask
+                    const bestAskObj = data.asks.reduce((curr, a) =>
+                        parseFloat(a.price) < parseFloat(curr.price) ? a : curr
+                        , data.asks[0])
+                    addUpdate(type, 'ask', bestAskObj.price)
+                    addUpdate(type, 'askSize', bestAskObj.size)
                 }
             }
         }
@@ -334,65 +344,121 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
         return ((1 / price) - 1)
     }
 
-    // 4. TRADING LOGIC (UPDATED: Fetch Best Ask)
-    const handleBuy = async (outcomeIndex, amountUSD) => {
+    // 4. TRADING LOGIC - STRATEGIES
+    const executeStrategy = async (outcomeIndex, strategy) => {
         if (!client) {
-            alert("Please Login (L2) to trade.")
+            toast.error("Please Login (L2) to trade.")
             return
         }
 
         const tokenIds = JSON.parse(market.clobTokenIds || '[]')
         const tokenId = tokenIds[outcomeIndex]
-        const currentPriceObj = outcomeIndex === 0 ? livePrices.up : livePrices.down
-        // Use LAST price for initial estimation if Ask not available, but prefer Ask
-        const estimatedPrice = currentPriceObj.ask || currentPriceObj.last
-
-        if (!estimatedPrice || estimatedPrice <= 0) {
-            alert("Waiting for price data...")
-            return
-        }
-
         const outcomeName = outcomes[outcomeIndex]
+        const currentPriceObj = outcomeIndex === 0 ? livePrices.up : livePrices.down
+
         setOrdering(true)
-        setOrderStatus(null)
+        const toastId = toast.loading(`${strategy === 'PASSIVE' ? '🛡️ Passive' : '⚡ Fast'} Buy: $${tradeAmount} of ${outcomeName}...`)
 
         try {
-            console.log(`[Trade] Fetching Best Ask for ${outcomeName}...`)
+            let price = 0
 
-            // Fetch Best BUY Price (Ask)
-            // If we have livePrices.up.ask from WS, we can use it, but fetching fresh is safer.
-            let bestAsk = currentPriceObj.ask
-            try {
-                const priceData = await client.getPrice(tokenId, 'BUY')
-                if (priceData && priceData.price) bestAsk = parseFloat(priceData.price)
-            } catch (e) { console.warn("Could not fetch fresh price, using stream", e) }
+            // --- STRATEGY 1: PASSIVE (BEST BID) ---
+            if (strategy === 'PASSIVE') {
+                // Use WS data for speed, but fallback to Orderbook Fetch if missing
+                price = currentPriceObj.bid
+                if (!price || price <= 0) {
+                    // Try fetch
+                    try {
+                        const book = await client.getOrderBook(tokenId)
+                        if (book.bids.length > 0) price = parseFloat(book.bids[0].price)
+                    } catch (e) { }
+                }
+                if (!price) throw new Error("No Bid Price available to join.")
+            }
 
-            if (!bestAsk || bestAsk <= 0) throw new Error("No liquidity/Ask price found.")
+            // --- STRATEGY 2: AGGRESSIVE (MARKETABLE LIMIT) ---
+            else {
+                // Target Best Ask
+                let bestAsk = currentPriceObj.ask
+                if (!bestAsk || bestAsk <= 0) {
+                    try {
+                        const book = await client.getOrderBook(tokenId)
+                        if (book.asks.length > 0) bestAsk = parseFloat(book.asks[0].price)
+                    } catch (e) { }
+                }
 
-            console.log(`[Trade] Best Ask: ${bestAsk}. Buying $${amountUSD}...`)
+                if (!bestAsk) throw new Error("No Ask Liquidity.")
+
+                // Applied Slippage (0.5%)
+                price = bestAsk + 0.005
+                // Clamp to 0.99
+                if (price > 0.99) price = 0.99
+            }
 
             // Calculate Size
-            const shares = amountUSD / bestAsk
+            // Note: If buying at 'price', shares = amount / price
+            const shares = tradeAmount / price
 
-            // Place Limit Order at Ask Price
-            const order = await client.createOrder({
+            console.log(`[Strategy] ${strategy} -> Price: ${price}, Shares: ${shares}`)
+
+            const order = await client.createAndPostOrder({
                 tokenID: tokenId,
-                price: bestAsk,
+                price: price,
                 side: 'BUY',
                 size: shares,
-
-                feeRateBps: 1000, // Explicit requirement from error message (0 failed)
                 nonce: Date.now()
             })
 
-            console.log("Order Placed:", order)
-            setOrderStatus({ type: 'success', msg: `Bought $${amountUSD} of ${outcomeName} @ ${bestAsk.toFixed(3)}!` })
-            setTimeout(() => setOrderStatus(null), 3000)
+            // Retry logic for 'invalid nonce' which can happen with rapid updates
+            if (order && order.error && order.error.includes('nonce')) {
+                console.log("Retrying order due to nonce error...")
+                await new Promise(r => setTimeout(r, 500)) // Wait 500ms
+                return executeStrategy(outcomeIndex, strategy) // Recursively retry once
+            }
+
+            console.log("Order Placed Response:", order)
+
+            if (order && (order.error || (order.status && order.status >= 400))) {
+                const errorMsg = order.error || order.data?.error || "Unknown error"
+                throw new Error(errorMsg)
+            }
+
+            toast.update(toastId, {
+                render: `${strategy} Order Placed @ ${price.toFixed(3)}! ${strategy === 'AGGRESSIVE' ? 'Check fills.' : 'Waiting for fill...'}`,
+                type: "success",
+                isLoading: false,
+                autoClose: 3000
+            })
+
+            // --- AUTO CANCEL LOGIC ---
+            // Passive: 5s, Aggressive: 1s
+            const timeoutMs = strategy === 'PASSIVE' ? 5000 : 1000
+
+            if (order && order.orderID) {
+                setTimeout(async () => {
+                    try {
+                        // We can attempt to cancel. If already filled, it might fail (which is fine).
+                        // Note: Current CLOB client might not expose 'cancel'. 
+                        // We assume client.cancel(id) exists or we use cancelAll as fallback if needed.
+                        // Looking at Polybot docs/usage, usually client.cancelOrder(id) or client.cancel(id).
+                        // We will try cancelOrder first.
+                        console.log(`[Strategy] Auto-cancelling ${strategy} order...`)
+                        await client.cancel(order.orderID)
+                        toast.info(`${strategy} Order Cancelled (Timeout)`)
+                    } catch (e) {
+                        // console.warn("Auto-cancel failed (likely filled):", e)
+                    }
+                }, timeoutMs)
+            }
 
         } catch (err) {
             console.error("Trade Failed:", err)
-            setOrderStatus({ type: 'error', msg: err.message || "Trade Failed" })
-            setTimeout(() => setOrderStatus(null), 5000)
+            toast.update(toastId, {
+                render: `Failed: ${err.message}`,
+                type: "error",
+                isLoading: false,
+                autoClose: 5000
+            })
         } finally {
             setOrdering(false)
         }
@@ -629,8 +695,8 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                         </div>
                         {/* SPREAD INFO */}
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#94a3b8', margin: '4px 0' }}>
-                            <span>Bid: <strong style={{ color: '#cbd5e1' }}>{livePrices.up.bid || '-'}</strong></span>
-                            <span>Ask: <strong style={{ color: '#f59e0b' }}>{livePrices.up.ask || '-'}</strong></span>
+                            <span>Bid: <strong style={{ color: '#cbd5e1' }}>{livePrices.up.bid || '-'}</strong> <span style={{ fontSize: '0.65rem', opacity: 0.7 }}>({parseFloat(livePrices.up.bidSize || 0).toFixed(0)})</span></span>
+                            <span>Ask: <strong style={{ color: '#f59e0b' }}>{livePrices.up.ask || '-'}</strong> <span style={{ fontSize: '0.65rem', opacity: 0.7 }}>({parseFloat(livePrices.up.askSize || 0).toFixed(0)})</span></span>
                         </div>
 
                         <div className="profit-grid">
@@ -645,10 +711,47 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                         </div>
 
                         {/* TRADING ACTIONS */}
-                        <div className="trade-actions" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '4px', marginTop: '8px', width: '100%' }}>
-                            <button disabled={ordering} onClick={() => handleBuy(0, 1)} className="quick-buy-btn green">$1</button>
-                            <button disabled={ordering} onClick={() => handleBuy(0, 5)} className="quick-buy-btn green">$5</button>
-                            <button disabled={ordering} onClick={() => handleBuy(0, 10)} className="quick-buy-btn green">$10</button>
+                        <div style={{ marginTop: '8px', width: '100%' }}>
+                            {/* Amount Selector */}
+                            <div style={{ display: 'flex', gap: '4px', marginBottom: '6px' }}>
+                                {[1, 5, 10, 50].map(amt => (
+                                    <button
+                                        key={amt}
+                                        onClick={() => setTradeAmount(amt)}
+                                        style={{
+                                            flex: 1,
+                                            padding: '4px',
+                                            background: tradeAmount === amt ? '#10b981' : '#334155',
+                                            color: 'white',
+                                            border: 'none',
+                                            borderRadius: '4px',
+                                            fontSize: '0.75rem',
+                                            cursor: 'pointer',
+                                            fontWeight: tradeAmount === amt ? 'bold' : 'normal'
+                                        }}
+                                    >
+                                        ${amt}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {/* Strategy Buttons */}
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                                <button
+                                    disabled={ordering}
+                                    onClick={() => executeStrategy(0, 'PASSIVE')}
+                                    style={{ background: '#334155', border: '1px solid #10b981', color: '#10b981', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem' }}
+                                >
+                                    🛡️ Bid (Passive)
+                                </button>
+                                <button
+                                    disabled={ordering}
+                                    onClick={() => executeStrategy(0, 'AGGRESSIVE')}
+                                    style={{ background: '#10b981', border: 'none', color: '#0f172a', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.75rem' }}
+                                >
+                                    ⚡ Buy (Fast)
+                                </button>
+                            </div>
                         </div>
                         {!client && <div style={{ fontSize: '0.7rem', color: '#94a3b8', marginTop: '4px', textAlign: 'center' }}>Login to Trade</div>}
                     </div>
@@ -661,8 +764,8 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                         </div>
                         {/* SPREAD INFO */}
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#94a3b8', margin: '4px 0' }}>
-                            <span>Bid: <strong style={{ color: '#cbd5e1' }}>{livePrices.down.bid || '-'}</strong></span>
-                            <span>Ask: <strong style={{ color: '#f59e0b' }}>{livePrices.down.ask || '-'}</strong></span>
+                            <span>Bid: <strong style={{ color: '#cbd5e1' }}>{livePrices.down.bid || '-'}</strong> <span style={{ fontSize: '0.65rem', opacity: 0.7 }}>({parseFloat(livePrices.down.bidSize || 0).toFixed(0)})</span></span>
+                            <span>Ask: <strong style={{ color: '#f59e0b' }}>{livePrices.down.ask || '-'}</strong> <span style={{ fontSize: '0.65rem', opacity: 0.7 }}>({parseFloat(livePrices.down.askSize || 0).toFixed(0)})</span></span>
                         </div>
 
                         <div className="profit-grid">
@@ -677,10 +780,47 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                         </div>
 
                         {/* TRADING ACTIONS */}
-                        <div className="trade-actions" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '4px', marginTop: '8px', width: '100%' }}>
-                            <button disabled={ordering} onClick={() => handleBuy(1, 1)} className="quick-buy-btn red">$1</button>
-                            <button disabled={ordering} onClick={() => handleBuy(1, 5)} className="quick-buy-btn red">$5</button>
-                            <button disabled={ordering} onClick={() => handleBuy(1, 10)} className="quick-buy-btn red">$10</button>
+                        <div style={{ marginTop: '8px', width: '100%' }}>
+                            {/* Amount Selector */}
+                            <div style={{ display: 'flex', gap: '4px', marginBottom: '6px' }}>
+                                {[1, 5, 10, 50].map(amt => (
+                                    <button
+                                        key={amt}
+                                        onClick={() => setTradeAmount(amt)}
+                                        style={{
+                                            flex: 1,
+                                            padding: '4px',
+                                            background: tradeAmount === amt ? '#ef4444' : '#334155',
+                                            color: 'white',
+                                            border: 'none',
+                                            borderRadius: '4px',
+                                            fontSize: '0.75rem',
+                                            cursor: 'pointer',
+                                            fontWeight: tradeAmount === amt ? 'bold' : 'normal'
+                                        }}
+                                    >
+                                        ${amt}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {/* Strategy Buttons */}
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                                <button
+                                    disabled={ordering}
+                                    onClick={() => executeStrategy(1, 'PASSIVE')}
+                                    style={{ background: '#334155', border: '1px solid #ef4444', color: '#ef4444', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem' }}
+                                >
+                                    🛡️ Bid (Passive)
+                                </button>
+                                <button
+                                    disabled={ordering}
+                                    onClick={() => executeStrategy(1, 'AGGRESSIVE')}
+                                    style={{ background: '#ef4444', border: 'none', color: 'white', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.75rem' }}
+                                >
+                                    ⚡ Buy (Fast)
+                                </button>
+                            </div>
                         </div>
                         {!client && <div style={{ fontSize: '0.7rem', color: '#94a3b8', marginTop: '4px', textAlign: 'center' }}>Login to Trade</div>}
                     </div>

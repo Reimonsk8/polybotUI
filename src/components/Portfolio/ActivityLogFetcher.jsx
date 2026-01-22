@@ -6,8 +6,7 @@ export const fetchActivityLog = async (userAddress, client, proxyUrl, useProxy) 
             return []
         }
 
-        console.log('[Activity Log] Starting fetch for user:', userAddress)
-        console.log('[Activity Log] User address (should be proxy wallet):', userAddress)
+
 
         // Try to get authentication headers from client if available
         let authHeaders = {}
@@ -25,7 +24,7 @@ export const fetchActivityLog = async (userAddress, client, proxyUrl, useProxy) 
                     if (client.creds.apiKey) {
                         authHeaders['POLY-SIGNATURE'] = client.creds.apiKey
                     }
-                    console.log('[Activity Log] Using authenticated request')
+
                 }
             } catch (authErr) {
                 console.warn('[Activity Log] Could not create auth headers:', authErr)
@@ -44,7 +43,7 @@ export const fetchActivityLog = async (userAddress, client, proxyUrl, useProxy) 
         // ALWAYS use proxy to avoid CORS
         const activityUrl = `${proxyUrl}/api/data-api/activity?${params.toString()}`
 
-        console.log('[Activity Log] Fetching from proxy')
+
 
         const response = await fetch(activityUrl, {
             headers: {
@@ -53,7 +52,7 @@ export const fetchActivityLog = async (userAddress, client, proxyUrl, useProxy) 
             }
         })
 
-        console.log('[Activity Log] Response status:', response.status)
+
 
         if (!response.ok) {
             const errorText = await response.text()
@@ -61,10 +60,9 @@ export const fetchActivityLog = async (userAddress, client, proxyUrl, useProxy) 
 
             // Fallback: Try using client.getTrades if Data API fails
             if (client) {
-                console.log('[Activity Log] Falling back to client.getTrades() method')
                 try {
                     const trades = await client.getTrades({ limit: 100 })
-                    console.log('[Activity Log] client.getTrades() returned:', trades?.length || 0, 'trades')
+
 
                     if (trades && trades.length > 0) {
                         // Sort by timestamp descending (most recent first)
@@ -75,11 +73,11 @@ export const fetchActivityLog = async (userAddress, client, proxyUrl, useProxy) 
                         })
 
                         const firstTradeTime = sortedTrades[0].match_time || sortedTrades[0].timestamp
-                        console.log('[Activity Log] Most recent trade:', new Date(firstTradeTime * 1000).toLocaleString())
+
 
                         // Enrich with market metadata via proxy
                         const uniqueMarketIds = [...new Set(sortedTrades.map(t => t.market))]
-                        console.log('[Activity Log] Fetching metadata for', uniqueMarketIds.length, 'unique markets')
+
                         const metadataMap = new Map()
 
                         // Fetch metadata sequentially to avoid rate limits
@@ -123,7 +121,7 @@ export const fetchActivityLog = async (userAddress, client, proxyUrl, useProxy) 
                             }
                         })
 
-                        console.log('[Activity Log] Successfully enriched', mappedTrades.length, 'trades')
+
                         return mappedTrades
                     }
                 } catch (clientErr) {
@@ -140,10 +138,11 @@ export const fetchActivityLog = async (userAddress, client, proxyUrl, useProxy) 
         }
 
         const data = await response.json()
-        console.log('[Activity Log] Data API returned:', data?.length || 0, 'activity items')
+
 
         if (Array.isArray(data) && data.length > 0) {
-            console.log('[Activity Log] First activity type:', data[0].type, 'at', new Date(data[0].timestamp * 1000).toLocaleString())
+
+
 
             // Map to ensure consistent structure with market object for UI
             const enrichedData = data.map(item => ({

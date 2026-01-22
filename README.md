@@ -1,135 +1,97 @@
-# PolyBot UI - Bitcoin Market Tracker
+# PolyBot UI - Advanced Polymarket Portfolio & Trading
 
-🎯 Real-time Bitcoin Up/Down prediction market tracker for Polymarket
+Detailed and real-time portfolio management dashboard for Polymarket. Monitor live positions, track P&L with real-time CLOB data, and execute instant gas-less trades directly from your dashboard.
 
 ## 🚀 Live Demo
-
-Visit the live app: **[https://reimonsk8.github.io/polybotUI/](https://reimonsk8.github.io/polybotUI/)**
-
-## ✨ Features
-
-- 📊 **Timeline Carousel** - Horizontal scrolling view of markets sorted by closing time
-- ⏰ **Visual Timeline** - Time badges showing countdown to market close
-- 🔴 **Urgency Indicators** - Red pulsing badges for markets closing soon (<5 min)
-- 💰 **Profit Calculator** - Instant profit calculations for $1 bets
-- 🔄 **Auto-Refresh** - Live price updates every 10/30/60 seconds
-- 📈 **Real-Time Prices** - Fetches live prices from Polymarket CLOB API
-- 🎨 **Premium Dark UI** - Modern design with gradients and animations
-
-## 🛠️ Tech Stack
-
-- **Frontend**: React + Vite
-- **Styling**: Vanilla CSS with modern design
-- **API**: Polymarket Gamma API + CLOB API
-- **Proxy**: Express.js (for CORS bypass)
-- **Deployment**: GitHub Pages
-
-## 📦 Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/Reimonsk8/polybotUI.git
-cd polybotUI
-
-# Install dependencies
-npm install
-
-# Start development servers
-npm run dev      # Frontend (http://localhost:5173)
-npm run server   # Proxy server (http://localhost:3001)
-```
-
-## 🚀 Deployment
-
-The app automatically deploys to GitHub Pages on every push to `main` branch.
-
-### Manual Deployment
-
-```bash
-# Build for production
-npm run build
-
-# Preview production build
-npm run preview
-```
-
-## 📖 How to Use
-
-1. **Fetch Markets**: Click "Fetch Market Data" to load active Bitcoin Up/Down markets
-2. **Enable Auto-Refresh**: Toggle auto-refresh for live price updates
-3. **Scroll Timeline**: Navigate through markets sorted by closing time
-4. **Watch for Urgency**: Red badges indicate markets closing soon
-5. **Trade**: Click "Trade →" on any market to go to Polymarket
-
-## 🎯 Market Information
-
-Each market card displays:
-- ⏰ Time until close (e.g., "15m", "1h 30m")
-- 🎯 Exact closing time
-- 📈 UP outcome with probability and profit
-- 📉 DOWN outcome with probability and profit
-- 💵 Current volume
-- 🔗 Direct trade link
-
-## 🔧 Development
-
-### Project Structure
-
-```
-polybotUI/
-├── src/
-│   ├── App.jsx          # Main React component
-│   ├── App.css          # Styling
-│   └── main.jsx         # Entry point
-├── server.js            # Express proxy server
-├── .github/
-│   └── workflows/
-│       └── deploy.yml   # GitHub Pages deployment
-└── package.json
-```
-
-### API Endpoints
-
-- **Gamma API**: `https://gamma-api.polymarket.com/events`
-- **CLOB API**: `https://clob.polymarket.com/price`
-- **Local Proxy**: `http://localhost:3001/api/markets`
-
-## 🎨 Features in Detail
-
-### Timeline Carousel
-- Horizontal scrolling with snap-to-card behavior
-- Markets sorted by closing time (earliest first)
-- Visual timeline with dots and connecting lines
-- Animated time badges that float
-
-### Auto-Refresh
-- Configurable intervals: 10s, 30s, 60s
-- Live indicator (🟢 LIVE) when active
-- Fetches fresh prices from orderbook
-- Updates all markets simultaneously
-
-### Urgency System
-- 🔵 Blue badge: >5 minutes remaining
-- 🔴 Red pulsing badge: <5 minutes (CLOSING SOON!)
-- ⚠️ "CLOSING NOW!": <1 minute remaining
-
-## 📝 License
-
-MIT License - feel free to use and modify!
-
-## 🤝 Contributing
-
-Contributions are welcome! Feel free to:
-- Report bugs
-- Suggest features
-- Submit pull requests
-
-## 🔗 Links
-
-- **Live App**: https://reimonsk8.github.io/polybotUI/
-- **GitHub**: https://github.com/Reimonsk8/polybotUI
-- **Polymarket**: https://polymarket.com
+**[https://reimonsk8.github.io/polybotUI/](https://reimonsk8.github.io/polybotUI/)**
 
 ---
 
-Built with ❤️ for the Polymarket community
+## ✨ Features
+
+### 💼 Portfolio Management
+- **Dashboard View**: See all your Active Bets, Closed Positions, and Activity Log in one place.
+- **Real-Time P&L**: Live profit/loss updates based on the current Order Book (Best Bid) prices.
+- **Visuals**: Position cards with market icons, outcome badges (YES/NO), and detailed stats.
+- **Authentication**: Supports Login via Private Key (EOA) or API Credentials.
+
+### ⚡ Direct Trading
+- **Instant "Sell All"**: One-click liquidation of positions at the best available market price.
+- **Gas-Less Trading**: Fully supports **Type 1 (Poly Proxy)** and **Type 2 (Gnosis Safe)** signatures for free sponsored transactions.
+- **Smart Price Execution**: Automatically fetching the real-time Order Book to execute sales at the optimal price, with fallback protection and price clamping.
+
+### 🔌 Real-Time Data
+- **WebSocket Integration**: Subscribes to your personal trade events for instant updates.
+- **Auto-Refresh**: Polls market prices every 2 seconds to keep portfolio values accurate.
+- **Status Indicators**: Visual cues (⚡ Lightning Bolt) showing which data is live from the exchange.
+
+---
+
+## 🛠️ Architecture
+
+This application uses a hybrid approach to ensure speed and bypass CORS restrictions:
+
+1.  **Frontend (React + Vite)**:
+    *   **Direct CLOB Connection**: Connects directly to `clob.polymarket.com` for extremely fast trading execution and Order Book checks.
+    *   **Live Data**: Uses Polymarket WebSockets for trade confirmation.
+2.  **Serverless Proxy (Vercel)**:
+    *   **Data API Bridge**: Proxies requests to `data-api.polymarket.com` (Positions, Balance) and `gamma-api.polymarket.com` (Profiles) to bypass browser CORS policies.
+
+---
+
+## 🔐 Authentication Modes
+
+The app supports multiple login methods to match your Polymarket account type:
+
+| Method | User Type | Description |
+| :--- | :--- | :--- |
+| **Email / Google** | **Type 1 (Poly Proxy)** | **Recommended**. Uses the proxy wallet automatically created by Polymarket for Magic Link users. Fast, gas-less trading. |
+| **Metamask** | **Type 2 (Gnosis)** | For users who connect via browser wallet. Also gas-less. |
+| **Private Key** | **Type 0 (EOA)** | Direct wallet access. Standard method for bots or advanced users. |
+
+*Note: Your credentials are used locally to sign messages and are stored in your browser's Session Storage only.*
+
+---
+
+## 📦 Installation (Local)
+
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/Reimonsk8/polybotUI.git
+   cd polybotUI
+   ```
+
+2. **Install dependencies**:
+   ```bash
+   npm install
+   ```
+
+3. **Set up Environment Variables**:
+   Create a `.env` file based on `.env.example`:
+   ```bash
+   # Optional: Your Proxy Wallet Address for faster login
+   VITE_PROXY_WALLET_ADDRESS=0x...
+   ```
+
+4. **Run Development Server**:
+   ```bash
+   npm run dev
+   # Opens http://localhost:5173
+   ```
+
+---
+
+## 📖 How to Use
+
+1.  **Login**: Use the "Login" button to enter your Private Key or API Credentials.
+2.  **View Portfolio**: Your active positions will load automatically.
+3.  **Toggle Live Updates**: Switch on "Live Updates" to see real-time price changes.
+4.  **Sell Positions**: Click the red **"💸 Sell All"** button on any position to exit immediately at the best available price.
+
+---
+
+## 🤝 Contributing
+Contributions are welcome! Please fork the repo and submit a PR for any features or fixes.
+
+## 📝 License
+MIT License - Open for modification and use.

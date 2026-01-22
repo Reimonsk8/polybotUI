@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react'
 import './PortfolioTabs.css'
 import { fetchActivityLog as fetchActivityData } from './ActivityLogFetcher'
 import { Side, OrderType } from '@polymarket/clob-client'
+import { toast } from 'react-toastify'
+import ConfirmModal from './ConfirmModal'
 
 const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
     const [activeTab, setActiveTab] = useState('active') // 'active', 'closed', 'activity'
@@ -18,6 +20,10 @@ const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
     const [takeProfitPercent, setTakeProfitPercent] = useState(25)
     const [stopLossPercent, setStopLossPercent] = useState(50)
     const [triggeredOrders, setTriggeredOrders] = useState(new Set()) // Track executed sells to prevent loops
+
+    // MODAL STATE
+    const [sellModalOpen, setSellModalOpen] = useState(false)
+    const [betToSell, setBetToSell] = useState(null)
 
     // Fetch Active Bets using Data API /positions endpoint
     const fetchActiveBets = async () => {
@@ -109,19 +115,26 @@ const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
                                             priceFound = !isNaN(livePrice)
                                         }
                                     } catch (err) {
-                                        // Silent fail, fallback to fetch
+                                        // Ignore 404 (No matching orderbook)
+                                        if (err.message && !err.message.includes('404')) {
+                                            // console.warn('OrderBook Error:', err)
+                                        }
                                     }
                                 }
 
                                 // OPTION B: Raw Fetch (Fallback)
                                 if (!priceFound) {
-                                    const clobRes = await fetch(`https://clob.polymarket.com/price?token_id=${pos.asset}&side=sell`)
-                                    if (clobRes.ok) {
-                                        const clobData = await clobRes.json()
-                                        if (clobData.price) {
-                                            livePrice = parseFloat(clobData.price)
-                                            priceFound = true
+                                    try {
+                                        const clobRes = await fetch(`https://clob.polymarket.com/price?token_id=${pos.asset}&side=sell`)
+                                        if (clobRes.ok) {
+                                            const clobData = await clobRes.json()
+                                            if (clobData.price) {
+                                                livePrice = parseFloat(clobData.price)
+                                                priceFound = true
+                                            }
                                         }
+                                    } catch (err) {
+                                        // Ignore network errors on fallback
                                     }
                                 }
 
@@ -451,22 +464,28 @@ const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
         return () => clearInterval(interval)
     }, [autoSellEnabled, liveUpdates, activeTab, userAddress])
 
-    // SELL LOGIC
-    const handleSellPosition = async (bet) => {
+    // SELL LOGIC - TRIGGER (Opens Modal)
+    const handleSellClick = (bet) => {
         if (!client) {
-            alert("L2 Authentication required to sell.")
+            toast.error("L2 Authentication required to sell.")
             return
         }
+        setBetToSell(bet)
+        setSellModalOpen(true)
+    }
+
+    // SELL LOGIC - EXECUTE (Called by Modal)
+    const confirmSellPosition = async () => {
+        const bet = betToSell
+        if (!bet) return
+
+        // Close modal immediately
+        setSellModalOpen(false)
+        setBetToSell(null)
 
         const sizeToSell = bet.size
         // Use live price if available, otherwise fetch or use curPrice
         let sellPrice = bet.curPrice
-
-        // Confirm
-        const estValue = sizeToSell * sellPrice
-        if (!confirm(`Are you sure you want to SELL ALL ${bet.size.toFixed(2)} shares of ${bet.title} (${bet.outcome})?\n\nEstimated Payout: $${estValue.toFixed(2)}`)) {
-            return
-        }
 
         try {
             // 1. Fetch Fresh Best Bid (Sell Price) to be safe
@@ -498,7 +517,7 @@ const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
 
             // Final safety check
             if (isNaN(sellPrice)) {
-                alert("Cannot sell: Unable to determine a valid market price.")
+                toast.error("Cannot sell: Unable to determine a valid market price.")
                 return
             }
 
@@ -519,20 +538,20 @@ const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
             console.log("Sell Order Response:", response)
 
             if (response && response.orderID) {
-                alert(`Sell Order Placed Successfully! ID: ${response.orderID}`)
+                toast.success(`Sell Order Placed! ID: ${response.orderID}`)
             } else {
-                alert("Sell Order Submitted (Check Activity)")
+                toast.info("Sell Order Submitted (Check Activity)")
             }
 
-            console.log("Sell Order Placed:", order)
-            alert(`Sell Order Placed! ID: ${order.orderID || 'Submitted'}`)
+            console.log("Sell Order Placed:", response)
+            // toast.success(`Sell Order Placed! ID: ${response.orderID || 'Submitted'}`) // logic handled above
 
             // Refresh
             setTimeout(fetchActiveBets, 1000)
 
         } catch (err) {
             console.error("Sell Failed:", err)
-            alert(`Sell Failed: ${err.message}`)
+            toast.error(`Sell Failed: ${err.message}`)
         }
     }
 
@@ -575,7 +594,7 @@ const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
                                     checked={autoSellEnabled}
                                     onChange={(e) => {
                                         if (!client && e.target.checked) {
-                                            alert("Login (L2) required for Auto-Sell")
+                                            toast.error("Login (L2) required for Auto-Sell")
                                             return
                                         }
                                         setAutoSellEnabled(e.target.checked)
@@ -702,7 +721,7 @@ const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
                                                 <div className="position-actions" style={{ marginTop: '12px', borderTop: '1px solid #334155', paddingTop: '12px' }}>
                                                     <button
                                                         className="sell-btn"
-                                                        onClick={() => handleSellPosition(bet)}
+                                                        onClick={() => handleSellClick(bet)}
                                                         disabled={!client}
                                                         style={{
                                                             width: '100%',
@@ -844,7 +863,22 @@ const PortfolioTabs = ({ userAddress, client, apiCreds }) => {
                     </label>
                 </div>
             </div>
-        </div>
+
+            {/* SELL CONFIRMATION MODAL */}
+            <ConfirmModal
+                isOpen={sellModalOpen}
+                title="Confirm Sell Order"
+                message={betToSell ? `Are you sure you want to SELL ALL ${betToSell.size.toFixed(2)} shares of:\n\n${betToSell.title} (${betToSell.outcome})?\n\nEstimated Payout: $${(betToSell.size * betToSell.curPrice).toFixed(2)}` : ''}
+                onConfirm={confirmSellPosition}
+                onCancel={() => {
+                    setSellModalOpen(false)
+                    setBetToSell(null)
+                }}
+                confirmText="💸 Sell Position"
+                cancelText="Keep"
+                isDestructive={true}
+            />
+        </div >
     )
 }
 

@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react'
+import { ToastContainer } from 'react-toastify'
+import 'react-toastify/dist/ReactToastify.css'
 import './App.css'
 import MarketChart from './components/Charts/MarketChart'
 import MiniChart from './components/Charts/MiniChart'
@@ -116,6 +118,7 @@ function App() {
 
   return (
     <div className="app">
+      <ToastContainer position="bottom-right" theme="dark" />
       <div className="container">
         <UserPortfolio onStateChange={setUserState} />
 
