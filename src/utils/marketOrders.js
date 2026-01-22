@@ -16,6 +16,34 @@ import {
 } from './relayerClient'
 import { addLog, STEP_STATUS } from './debugLogger'
 
+// Time Sync Logic
+let timeOffset = 0
+let timeSynced = false
+
+async function syncTime() {
+    try {
+        const start = Date.now()
+        const res = await fetch('https://clob.polymarket.com/time')
+        const data = await res.json()
+
+        // Helper to parse ISO string safely
+        const serverTime = new Date(data.time).getTime()
+        const end = Date.now()
+        const latency = (end - start) / 2
+
+        // Calculate offset: Server - Local
+        timeOffset = serverTime - (end - latency)
+        timeSynced = true
+        console.log(`[TimeSync] Synced! Offset: ${timeOffset}ms`)
+        addLog('TimeSync', `Synced. Offset: ${Math.round(timeOffset)}ms`, STEP_STATUS.INFO)
+    } catch (e) {
+        console.warn('[TimeSync] Failed', e)
+        addLog('TimeSync', 'Failed to sync time', STEP_STATUS.WARNING)
+    }
+}
+// Attempt sync immediately
+syncTime()
+
 /**
  * Place a market order with automatic gasless execution
  * @param {Object} client - Authenticated CLOB client
@@ -138,8 +166,11 @@ async function placeStandardMarketOrder(client, tokenId, side, size, options = {
         if (marketPrice >= 1) marketPrice = 0.99
         if (marketPrice <= 0) marketPrice = 0.01
 
-        // 5. Generate nonce
-        const generateNonce = () => Date.now() + Math.floor(Math.random() * 1000)
+        // 5. Generate nonce with Time Offset
+        const generateNonce = () => {
+            const now = Date.now() + timeOffset
+            return now + Math.floor(Math.random() * 1000)
+        }
 
         // 6. Create and post order at best price (simulates market order)
         const payload = {

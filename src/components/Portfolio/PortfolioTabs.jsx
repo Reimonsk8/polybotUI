@@ -773,6 +773,21 @@ const PortfolioTabs = ({
                         console.log(`[Redeem] Using gas limit: ${gasLimit.toString()}`)
                     }
 
+                    // Boost gas fees to avoid "replacement fee too low" or "below minimum"
+                    try {
+                        const feeData = await signer.provider.getFeeData()
+                        // Boost by 30%
+                        if (feeData.maxFeePerGas) {
+                            txParams.maxFeePerGas = feeData.maxFeePerGas.mul(130).div(100)
+                            txParams.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas.mul(130).div(100)
+                            txParams.type = 2 // EIP-1559
+                        } else if (feeData.gasPrice) {
+                            txParams.gasPrice = feeData.gasPrice.mul(130).div(100)
+                        }
+                    } catch (gasErr) {
+                        console.warn("Failed to boost gas, using defaults", gasErr)
+                    }
+
                     const tx = await signer.sendTransaction(txParams)
 
                     toast.loading(`⏳ Redeeming... Tx: ${tx.hash.slice(0, 10)}...`, { autoClose: false })
