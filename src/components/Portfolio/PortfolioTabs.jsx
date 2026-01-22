@@ -776,13 +776,20 @@ const PortfolioTabs = ({
                     // Boost gas fees to avoid "replacement fee too low" or "below minimum"
                     try {
                         const feeData = await signer.provider.getFeeData()
+                        const MIN_GAS_PRICE = ethers.utils.parseUnits('50', 'gwei')
+
                         // Boost by 30%
                         if (feeData.maxFeePerGas) {
-                            txParams.maxFeePerGas = feeData.maxFeePerGas.mul(130).div(100)
+                            let newMaxFee = feeData.maxFeePerGas.mul(130).div(100)
+                            if (newMaxFee.lt(MIN_GAS_PRICE)) newMaxFee = MIN_GAS_PRICE
+
+                            txParams.maxFeePerGas = newMaxFee
                             txParams.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas.mul(130).div(100)
                             txParams.type = 2 // EIP-1559
                         } else if (feeData.gasPrice) {
-                            txParams.gasPrice = feeData.gasPrice.mul(130).div(100)
+                            let newGasPrice = feeData.gasPrice.mul(130).div(100)
+                            if (newGasPrice.lt(MIN_GAS_PRICE)) newGasPrice = MIN_GAS_PRICE
+                            txParams.gasPrice = newGasPrice
                         }
                     } catch (gasErr) {
                         console.warn("Failed to boost gas, using defaults", gasErr)
@@ -1086,33 +1093,58 @@ const PortfolioTabs = ({
                                                     </div>
                                                 </div>
 
-                                                {/* SELL BUTTON */}
+                                                {/* SELL / CLAIM BUTTON */}
+                                                {/* SELL / CLAIM BUTTON */}
                                                 <div className="position-actions" style={{ marginTop: '12px', borderTop: '1px solid #334155', paddingTop: '12px' }}>
-                                                    <button
-                                                        className="sell-btn"
-                                                        onClick={() => handleSellClick(bet)}
-                                                        disabled={!client}
-                                                        style={{
-                                                            width: '100%',
-                                                            padding: '10px',
-                                                            borderRadius: '6px',
-                                                            background: '#ef4444',
-                                                            color: 'white',
-                                                            border: 'none',
-                                                            fontWeight: '600',
-                                                            cursor: client ? 'pointer' : 'not-allowed',
-                                                            opacity: client ? 1 : 0.6,
-                                                            display: 'flex',
-                                                            justifyContent: 'center',
-                                                            alignItems: 'center',
-                                                            gap: '8px'
-                                                        }}
-                                                    >
-                                                        <span>💸 Sell All</span>
-                                                        <span style={{ fontWeight: '400', fontSize: '0.9em', opacity: 0.9 }}>
-                                                            (Est. {formatCurrency(bet.size * bet.curPrice)})
-                                                        </span>
-                                                    </button>
+                                                    {resolvedMarkets.has(bet.conditionId) ? (
+                                                        <button
+                                                            className="sell-btn"
+                                                            style={{
+                                                                width: '100%',
+                                                                padding: '10px',
+                                                                borderRadius: '6px',
+                                                                background: '#3b82f6',
+                                                                color: 'white',
+                                                                border: 'none',
+                                                                fontWeight: '600',
+                                                                cursor: 'pointer',
+                                                                display: 'flex',
+                                                                justifyContent: 'center',
+                                                                alignItems: 'center',
+                                                                gap: '8px',
+                                                                boxShadow: '0 4px 6px -1px rgba(59, 130, 246, 0.5)'
+                                                            }}
+                                                            onClick={() => handleSellClick(bet)}
+                                                        >
+                                                            <span>🎁 Claim Winnings</span>
+                                                        </button>
+                                                    ) : (
+                                                        <button
+                                                            className="sell-btn"
+                                                            onClick={() => handleSellClick(bet)}
+                                                            disabled={!client}
+                                                            style={{
+                                                                width: '100%',
+                                                                padding: '10px',
+                                                                borderRadius: '6px',
+                                                                background: '#ef4444',
+                                                                color: 'white',
+                                                                border: 'none',
+                                                                fontWeight: '600',
+                                                                cursor: client ? 'pointer' : 'not-allowed',
+                                                                opacity: client ? 1 : 0.6,
+                                                                display: 'flex',
+                                                                justifyContent: 'center',
+                                                                alignItems: 'center',
+                                                                gap: '8px'
+                                                            }}
+                                                        >
+                                                            <span>💸 Sell All</span>
+                                                            <span style={{ fontWeight: '400', fontSize: '0.9em', opacity: 0.9 }}>
+                                                                (Est. {formatCurrency(bet.size * bet.curPrice)})
+                                                            </span>
+                                                        </button>
+                                                    )}
                                                 </div>
                                             </div>
                                         ))}

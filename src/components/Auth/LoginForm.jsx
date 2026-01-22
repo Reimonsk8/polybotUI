@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import './LoginForm.css'
 
 const LoginForm = ({ onConnectPrivateKey, onConnectApiKey, onConnectFull, loading, error }) => {
@@ -10,6 +10,17 @@ const LoginForm = ({ onConnectPrivateKey, onConnectApiKey, onConnectFull, loadin
     const [apiAddressInput, setApiAddressInput] = useState('')
 
     const [showEmailLogin, setShowEmailLogin] = useState(false)
+
+    // Auto-load environment variables on mount
+    useEffect(() => {
+        // Short timeout to ensure state is ready
+        const timer = setTimeout(() => {
+            if (import.meta.env.VITE_PRIVATE_KEY) {
+                loadFromEnv()
+            }
+        }, 100)
+        return () => clearTimeout(timer)
+    }, [])
 
     const handleConnectPrivateKey = () => {
         onConnectPrivateKey(privateKeyInput, proxyAddressInput)
