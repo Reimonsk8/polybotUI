@@ -6,6 +6,8 @@ import { toast } from 'react-toastify'
 import ConfirmModal from './ConfirmModal'
 import { placeMarketOrder, checkMarketLiquidity } from '../../utils/marketOrders'
 import { initRelayerClient, redeemPositionsGasless } from '../../utils/relayerClient'
+import RiskCalculator from './RiskCalculator'
+import CandleChart from './CandleChart'
 
 const PortfolioTabs = ({
     userAddress,
@@ -44,6 +46,26 @@ const PortfolioTabs = ({
     // MODAL STATE
     const [sellModalOpen, setSellModalOpen] = useState(false)
     const [betToSell, setBetToSell] = useState(null)
+    const [chartOpen, setChartOpen] = useState(false)
+    const [selectedChartAsset, setSelectedChartAsset] = useState(null)
+    const [autoSellHelpOpen, setAutoSellHelpOpen] = useState(false)
+
+    // COPY BOT STATE
+    const [copyBotRunning, setCopyBotRunning] = useState(false)
+    const [copyTraders, setCopyTraders] = useState(() => {
+        const saved = localStorage.getItem('copyTraders')
+        return saved ? JSON.parse(saved) : []
+    })
+    const [copySettings, setCopySettings] = useState(() => {
+        const saved = localStorage.getItem('copySettings')
+        return saved ? JSON.parse(saved) : { fixedAmount: 10, maxSpread: 5, enabled: true }
+    })
+    const [copyLogs, setCopyLogs] = useState([])
+    const [processedMatchIds, setProcessedMatchIds] = useState(new Set())
+    const [botStartTime, setBotStartTime] = useState(null)
+
+    const [newTraderInput, setNewTraderInput] = useState('')
+    const [copyBotHelpOpen, setCopyBotHelpOpen] = useState(false)
 
     // Fetch Active Bets using Data API /positions endpoint
     const fetchActiveBets = async () => {
@@ -258,6 +280,171 @@ const PortfolioTabs = ({
             return []
         }
     }
+
+    // COPY BOT LOGIC
+    useEffect(() => {
+        if (!copyBotRunning || copyTraders.length === 0) return
+
+        const pollInterval = setInterval(async () => {
+            // console.log("[CopyBot] Polling traders...", copyTraders)
+
+            for (const traderAddress of copyTraders) {
+                try {
+                    // Use Proxy if available to avoid CORS or Rate Limits
+                    const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
+                    const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
+
+                    const url = useProxy
+                        ? `${proxyUrl}/api/data-api/activity?user=${traderAddress}&limit=5`
+                        : `https://data-api.polymarket.com/activity?user=${traderAddress}&limit=5`
+
+                    const res = await fetch(url)
+                    if (!res.ok) continue
+
+                    const data = await res.json()
+
+                    // Filter new trades
+                    // 1. Must be a TRADE (match)
+                    // 2. Timestamp must be after bot start time
+                    // 3. Must not be already processed
+
+                    const newTrades = data.filter(item => {
+                        const isTrade = item.type === 'TRADE' || (item.side && (item.side === 'BUY' || item.side === 'SELL'))
+                        // Timestamp is usually in seconds (Unix) or ISO string. API returns `timestamp` (seconds) or `match_time`
+                        const itemTime = item.timestamp || item.match_time
+                        const itemDate = new Date(typeof itemTime === 'number' ? itemTime * 1000 : itemTime)
+
+                        return isTrade &&
+                            itemDate > botStartTime &&
+                            !processedMatchIds.has(item.id || item.matchId)
+                    })
+
+                    for (const trade of newTrades) {
+                        const matchId = trade.id || trade.matchId
+                        // Double check processed (in case of double process in loop)
+                        if (processedMatchIds.has(matchId)) continue
+
+                        // Process Trade
+                        // Only COPY BUYS for now to keep it safe? 
+                        // Or Copy Sells if we have the position? 
+                        // Let's implement BUY AND SELL. Client will fail if we try to sell what we don't have.
+
+                        console.log(`[CopyBot] NEW TRADE DETECTED from ${traderAddress}:`, trade)
+                        setCopyLogs(prev => [`[${new Date().toLocaleTimeString()}] Detected ${trade.side} on ${trade.asset} by ${traderAddress.slice(0, 6)}...`, ...prev].slice(0, 50))
+
+                        // Add to processed immediately to prevent loops
+                        setProcessedMatchIds(prev => new Set(prev).add(matchId))
+
+                        if (!client) {
+                            setCopyLogs(prev => [`[Error] Client not ready, cannot copy.`, ...prev])
+                            continue
+                        }
+
+                        // EXECUTE COPY
+                        try {
+                            const side = trade.side // 'BUY' or 'SELL'
+                            const assetId = trade.asset
+                            const amountUSDC = parseFloat(copySettings.fixedAmount)
+
+                            if (side === 'BUY') {
+                                // For BUY: We want to spend `amountUSDC`. 
+                                // Market Buy expects `amount` in USDC (Cash) usually for "Aggressive" buys in UI?
+                                // Wait, `placeMarketOrder` utility:
+                                // if BUY -> amount is CASH amount (if using FOK Buy) or SHARES?
+                                // Let's check `placeMarketOrder` signature or usage active activeBets.
+                                // In `placeMarketOrder`: if side==BUY, amount is usually converted to shares inside or we pass shares?
+                                // CLOB Client `createMarketBuyOrder` takes amount in CASH (USDC).
+                                // But `placeMarketOrder` utility wrapper might differ.
+                                // Looking at previous code usage: 
+                                // `placeMarketOrder(client, bet.asset, "SELL", bet.size, ...)`
+                                // So for SELL it takes SHARES.
+                                // For BUY? 
+                                // Checking `utils/marketOrders.js` would be ideal, but let's assume standard CLOB behavior.
+                                // Actually better to use `client.createMarketBuyOrder` directly for clarity if utility is ambiguous.
+                                // BUT `placeMarketOrder` handles GASLESS credentials.
+
+                                // Let's try to infer from `FocusedMarketView`:
+                                // For BUY, it calculates quotes. 
+                                // Let's assume we want to Buy `amountUSDC` worth.
+                                // We need to convert to shares if `placeMarketOrder` expects shares for everything?
+                                // Usually Market BUY is by Spend (Cash).
+                                // Let's use `placeMarketOrder` and assume it handles it, OR check `placeMarketOrder` content. 
+                                // Use `client.createMarketBuyOrder` if we are sure.
+
+                                // SAFE BET: Calculate shares derived from price.
+                                let price = parseFloat(trade.price) || 0.5 // fallback
+                                if (price <= 0) price = 0.5
+                                const sharesToBuy = amountUSDC / price
+
+                                // Let's use `placeMarketOrder` but pay attention to arguments.
+                                // If I pass "BUY", does it treat amount as Shares or Cash?
+                                // Most generic implementations treat 'amount' as standard unit (shares).
+
+                                const result = await placeMarketOrder(
+                                    client,
+                                    assetId,
+                                    "BUY",
+                                    sharesToBuy, // Approx shares
+                                    { useGasless: true, builderCreds }
+                                )
+
+                                if (result.success) {
+                                    toast.success(`🤖 Copied BUY: ${sharesToBuy.toFixed(1)} shares`)
+                                    setCopyLogs(prev => [`[Success] Bought ${sharesToBuy.toFixed(1)} shares ($${amountUSDC})`, ...prev])
+                                }
+                            }
+                            else if (side === 'SELL') {
+                                // For SELL: We check if we have the position.
+                                // If we do, we sell ALL or proportional? 
+                                // Simple version: Sell fixed amount (or all if less).
+
+                                // Find our position
+                                const myPosition = activeBets.find(p => p.asset === assetId)
+                                if (myPosition) {
+                                    const sharesToSell = Math.min(myPosition.size, (amountUSDC / (parseFloat(trade.price) || 0.5)))
+
+                                    if (sharesToSell > 0.1) {
+                                        const result = await placeMarketOrder(
+                                            client,
+                                            assetId,
+                                            "SELL",
+                                            sharesToSell,
+                                            { useGasless: true, builderCreds, privateKey }
+                                        )
+                                        if (result.success) {
+                                            toast.success(`🤖 Copied SELL: ${sharesToSell.toFixed(1)} shares`)
+                                            setCopyLogs(prev => [`[Success] Sold ${sharesToSell.toFixed(1)} shares`, ...prev])
+                                        }
+                                    } else {
+                                        setCopyLogs(prev => [`[Skip] Sell detected but no/low position held.`, ...prev])
+                                    }
+                                } else {
+                                    setCopyLogs(prev => [`[Skip] Sell detected but position not found.`, ...prev])
+                                }
+                            }
+                        } catch (err) {
+                            console.error("Copy Trade Execution Failed", err)
+                            setCopyLogs(prev => [`[Failed] ${err.message}`, ...prev])
+                        }
+                    }
+
+                } catch (err) {
+                    console.error(`[CopyBot] Error polling ${traderAddress}`, err)
+                }
+            }
+        }, 5000)
+
+        return () => clearInterval(pollInterval)
+    }, [copyBotRunning, copyTraders, copySettings, botStartTime, activeBets, client])
+
+    // Save settings to local storage
+    useEffect(() => {
+        localStorage.setItem('copyTraders', JSON.stringify(copyTraders))
+    }, [copyTraders])
+
+    useEffect(() => {
+        localStorage.setItem('copySettings', JSON.stringify(copySettings))
+    }, [copySettings])
 
     // AUTO-SELL LOGIC
     // Check positions whenever activeBets updates
@@ -607,10 +794,10 @@ const PortfolioTabs = ({
     /*
     useEffect(() => {
         if (!autoRefresh || activeBets.length === 0) return
-
+    
         const assetIds = [...new Set(activeBets.map(b => b.asset).filter(Boolean))]
         if (assetIds.length === 0) return
-
+    
         const ws = new WebSocket('wss://ws-subscriptions-clob.polymarket.com/ws/market')
         // ... WebSocket logic ...
         
@@ -1068,508 +1255,688 @@ const PortfolioTabs = ({
     const formatCurrency = (value) => `$${parseFloat(value).toFixed(2)}`
 
     return (
-        <div className="portfolio-tabs">
-            {/* Tab Headers */}
-            <div className="tab-headers">
-                <button className={`tab-header ${activeTab === 'active' ? 'active' : ''}`} onClick={() => setActiveTab('active')}>Active Bets</button>
-                <button className={`tab-header ${activeTab === 'closed' ? 'active' : ''}`} onClick={() => setActiveTab('closed')}>Closed Positions</button>
-                <button className={`tab-header ${activeTab === 'activity' ? 'active' : ''}`} onClick={() => setActiveTab('activity')}>Activity Log</button>
-            </div>
+        <>
+            <div className="portfolio-tabs">
+                {/* Tab Headers */}
+                <div className="tab-headers">
+                    <button className={`tab-header ${activeTab === 'active' ? 'active' : ''}`} onClick={() => setActiveTab('active')}>Active Bets</button>
 
-            {/* Tab Content */}
-            <div className="tab-content">
-                {/* Auto-Sell Manager UI - Only Active Tab */}
-                {activeTab === 'active' && userAddress && (
-                    <div className="auto-sell-dashboard" style={{
-                        background: 'rgba(15, 23, 42, 0.6)',
-                        border: '1px solid #334155',
-                        borderRadius: '12px',
-                        padding: '16px',
-                        marginBottom: '20px',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: '12px'
-                    }}>
-                        <div className="auto-sell-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <span style={{ fontSize: '1.2rem' }}>🤖</span>
-                                <h3 style={{ margin: 0, fontSize: '1rem', color: '#e2e8f0' }}>Auto-Sell Bot</h3>
-                            </div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                                <span style={{
-                                    fontSize: '0.9rem',
-                                    fontWeight: '600',
-                                    color: autoSellEnabled ? '#34d399' : '#94a3b8',
-                                    transition: 'color 0.3s'
-                                }}>
-                                    {autoSellEnabled ? 'ENABLED' : 'DISABLED'}
-                                </span>
-                                <div style={{ position: 'relative', width: '60px', height: '34px' }}>
-                                    <input
-                                        type="checkbox"
-                                        id="auto-sell-toggle"
-                                        className="toggle-switch-input"
-                                        checked={autoSellEnabled}
-                                        onChange={(e) => {
-                                            if (!client && e.target.checked) {
-                                                toast.error("Login (L2) required for Auto-Sell")
-                                                return
-                                            }
-                                            setAutoSellEnabled(e.target.checked)
-                                            if (e.target.checked && !liveUpdates) setLiveUpdates(true)
-                                        }}
-                                    />
-                                    <label htmlFor="auto-sell-toggle" className="toggle-switch-label"></label>
-                                </div>
-                            </div>
-                        </div>
+                    <button className={`tab-header ${activeTab === 'calculator' ? 'active' : ''}`} onClick={() => setActiveTab('calculator')}>Risk Calc</button>
+                    <button className={`tab-header ${activeTab === 'copy-bot' ? 'active' : ''}`} onClick={() => setActiveTab('copy-bot')}>Copy Bot</button>
+                    <button className={`tab-header ${activeTab === 'activity' ? 'active' : ''}`} onClick={() => setActiveTab('activity')}>Activity Log</button>
+                </div>
 
-                        {/* Controls */}
-                        <div className="auto-sell-controls" style={{
-                            display: 'grid',
-                            gridTemplateColumns: '1fr 1fr 1fr',
-                            gap: '24px',
-                            transition: 'opacity 0.2s'
+                {/* Tab Content */}
+                <div className="tab-content">
+                    {/* Auto-Sell Manager UI - Only Active Tab */}
+                    {activeTab === 'active' && userAddress && (
+                        <div className="auto-sell-dashboard" style={{
+                            background: 'rgba(15, 23, 42, 0.6)',
+                            border: '1px solid #334155',
+                            borderRadius: '12px',
+                            padding: '16px',
+                            marginBottom: '20px',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '12px'
                         }}>
-                            {/* Take Profit */}
-                            <div className="control-group">
-                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-                                    <span style={{ color: '#10b981', fontWeight: '600', fontSize: '0.9rem' }}>Take Profit</span>
-                                    <span style={{ color: '#10b981', fontWeight: '700' }}>{takeProfitPercent}%</span>
-                                </div>
-                                <input
-                                    type="range"
-                                    min="1" max="200" step="1"
-                                    value={takeProfitPercent}
-                                    onChange={(e) => setTakeProfitPercent(Number(e.target.value))}
-                                    style={{ width: '100%', accentColor: '#10b981' }}
-                                />
-                                <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '4px' }}>
-                                    Sell if profit {'>'} {takeProfitPercent}%
-                                </div>
-                            </div>
-
-                            {/* Stop Loss */}
-                            <div className="control-group">
-                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-                                    <span style={{ color: '#ef4444', fontWeight: '600', fontSize: '0.9rem' }}>Stop Loss</span>
-                                    <span style={{ color: '#ef4444', fontWeight: '700' }}>-{stopLossPercent}%</span>
-                                </div>
-                                <input
-                                    type="range"
-                                    min="1" max="99" step="1"
-                                    value={stopLossPercent}
-                                    onChange={(e) => setStopLossPercent(Number(e.target.value))}
-                                    style={{ width: '100%', accentColor: '#ef4444' }}
-                                />
-                                <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '4px' }}>
-                                    Sell if loss {'>'} {stopLossPercent}%
-                                </div>
-                            </div>
-
-                            {/* Max Spread Tolerance */}
-                            <div className="control-group">
-                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                    <span style={{ fontSize: '0.9rem', fontWeight: '600', color: '#f59e0b' }}>Max Spread</span>
-                                    <span style={{ color: '#f59e0b', fontWeight: '700' }}>{maxSpreadPercent}%</span>
-                                </div>
-                                <input
-                                    type="range"
-                                    min="5" max="80" step="5"
-                                    value={maxSpreadPercent}
-                                    onChange={(e) => setMaxSpreadPercent(Number(e.target.value))}
-                                    style={{ width: '100%', accentColor: '#f59e0b' }}
-                                />
-                                <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '4px' }}>
-                                    Skip if spread {'>'} {maxSpreadPercent}%
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                {loading ? (
-                    <div className="loading-state">Loading...</div>
-                ) : (
-                    <>
-                        {/* Active Bets Tab */}
-                        {activeTab === 'active' && (
-                            <div className="tab-panel">
-                                {activeBets.length === 0 ? (
-                                    <div className="empty-state">No active positions found.</div>
-                                ) : (
-                                    <div className="positions-table-container" style={{ overflowX: 'auto', background: 'rgba(30, 41, 59, 0.4)', borderRadius: '12px', border: '1px solid rgba(255, 255, 255, 0.05)' }}>
-                                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
-                                            <thead>
-                                                <tr style={{ color: '#94a3b8', borderBottom: '1px solid #334155', textAlign: 'left', textTransform: 'uppercase', fontSize: '0.75rem' }}>
-                                                    <th style={{ padding: '16px', width: '35%' }}>Market</th>
-                                                    <th style={{ padding: '16px' }}>Qty</th>
-                                                    <th style={{ padding: '16px' }}>Avg &rarr; Now</th>
-                                                    <th style={{ padding: '16px' }}>Value</th>
-                                                    <th style={{ padding: '16px' }}>Return</th>
-                                                    <th style={{ padding: '16px', textAlign: 'right' }}>Action</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {displayedBets.map((bet, idx) => {
-                                                    // Formatting
-                                                    // Formatting helper for precision
-                                                    const formatPrice = (p) => p < 1 ? `${(p * 100).toFixed(1)}¢` : `$${p.toFixed(2)}`
-                                                    const avgPriceDisplay = formatPrice(bet.avgPrice)
-                                                    const curPriceDisplay = formatPrice(bet.curPrice)
-
-                                                    const currentVal = bet.size * bet.curPrice
-                                                    const costBasis = bet.size * bet.avgPrice
-                                                    const pnlValue = currentVal - costBasis
-                                                    const pnlPercent = costBasis > 0 ? (pnlValue / costBasis) * 100 : 0
-                                                    const isResolved = resolvedMarkets.has(bet.conditionId)
-
-                                                    return (
-                                                        <tr key={idx} style={{ borderBottom: '1px solid #334155' }}>
-                                                            {/* Market & Outcome */}
-                                                            <td style={{ padding: '16px' }}>
-                                                                <div style={{ display: 'flex', gap: '12px' }}>
-                                                                    {bet.icon && (
-                                                                        <img
-                                                                            src={bet.icon}
-                                                                            alt=""
-                                                                            style={{ width: '32px', height: '32px', borderRadius: '6px', marginTop: '2px' }}
-                                                                            onError={(e) => e.target.style.display = 'none'}
-                                                                        />
-                                                                    )}
-                                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                                                        <span style={{ color: '#e2e8f0', fontWeight: '600', fontSize: '0.9rem', lineHeight: '1.3' }}>
-                                                                            {bet.title}
-                                                                        </span>
-                                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                                            <span className={`outcome-badge ${bet.outcome.toLowerCase()}`} style={{ fontSize: '0.75rem', padding: '2px 8px' }}>
-                                                                                {bet.outcome}
-                                                                            </span>
-                                                                            {/* Live Indicator */}
-                                                                            {bet.isLive && (
-                                                                                <span style={{ fontSize: '0.7rem', color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px', background: 'rgba(16, 185, 129, 0.1)', padding: '1px 6px', borderRadius: '4px' }}>
-                                                                                    <span style={{ width: '6px', height: '6px', background: '#10b981', borderRadius: '50%' }}></span>
-                                                                                    LIVE
-                                                                                </span>
-                                                                            )}
-                                                                            {/* Time Remaining */}
-                                                                            {(bet.endDate || bet.market?.endDate) && (
-                                                                                <span style={{ fontSize: '0.7rem', color: '#f59e0b', background: 'rgba(245, 158, 11, 0.1)', padding: '1px 6px', borderRadius: '4px', display: 'flex', alignItems: 'center', gap: '3px' }}>
-                                                                                    ⏳ {(() => {
-                                                                                        const end = bet.endDate || bet.market?.endDate;
-
-                                                                                        // Parse end date properly accounting for ET timezone
-                                                                                        // Polymarket times are in ET (UTC-5 in winter, UTC-4 in summer)
-                                                                                        let endTime;
-                                                                                        try {
-                                                                                            endTime = new Date(end);
-
-                                                                                            // If the date string doesn't have timezone info (no 'Z' or offset),
-                                                                                            // it's likely in ET format but parsed as local time
-                                                                                            // We need to add the offset difference between local and ET
-                                                                                            if (!end.includes('Z') && !end.includes('+') && !end.includes('-', 10)) {
-                                                                                                // Get local timezone offset in minutes
-                                                                                                const localOffset = new Date().getTimezoneOffset();
-                                                                                                // ET is UTC-5 (EST) or UTC-4 (EDT)
-                                                                                                // Assuming EST (UTC-5) = +300 minutes offset from UTC
-                                                                                                const etOffset = 300; // Eastern Standard Time offset in minutes
-
-                                                                                                // Adjust: add difference between what JavaScript assumed (local) and what it should be (ET)
-                                                                                                const offsetDiff = localOffset - etOffset;
-                                                                                                endTime = new Date(endTime.getTime() + offsetDiff * 60 * 1000);
-                                                                                            }
-                                                                                        } catch (e) {
-                                                                                            return 'Invalid';
-                                                                                        }
-
-                                                                                        const diff = endTime - new Date();
-                                                                                        if (diff <= 0) return 'Ended';
-                                                                                        const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-                                                                                        const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-                                                                                        if (days > 0) return `${days}d ${hours}h`;
-                                                                                        const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-                                                                                        return `${hours}h ${mins}m`;
-                                                                                    })()}
-                                                                                </span>
-                                                                            )}
-                                                                        </div>
-                                                                    </div>
-                                                                </div>
-                                                            </td>
-
-                                                            {/* Qty */}
-                                                            <td style={{ padding: '16px', color: '#e2e8f0', fontSize: '0.95rem' }}>
-                                                                {bet.size.toFixed(2)}
-                                                            </td>
-
-                                                            {/* Avg -> Now */}
-                                                            <td style={{ padding: '16px', color: '#94a3b8' }}>
-                                                                <span style={{ color: '#e2e8f0' }}>{avgPriceDisplay}</span>
-                                                                <span style={{ margin: '0 6px', color: '#64748b' }}>&rarr;</span>
-                                                                <span style={{ color: bet.curPrice >= bet.avgPrice ? '#10b981' : '#f43f5e' }}>
-                                                                    {curPriceDisplay}
-                                                                </span>
-                                                            </td>
-
-                                                            {/* Value with Cost Basis */}
-                                                            <td style={{ padding: '16px' }}>
-                                                                <div style={{ display: 'flex', flexDirection: 'column' }}>
-                                                                    <span style={{ color: '#e2e8f0', fontWeight: '600', fontSize: '0.95rem' }}>
-                                                                        ${currentVal.toFixed(2)}
-                                                                    </span>
-                                                                    <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
-                                                                        Cost ${costBasis.toFixed(2)}
-                                                                    </span>
-                                                                    <span style={{ fontSize: '0.75rem', color: '#10b981', marginTop: '2px' }}>
-                                                                        Max ${bet.size.toFixed(2)}
-                                                                    </span>
-                                                                </div>
-                                                            </td>
-
-                                                            {/* Return */}
-                                                            <td style={{ padding: '16px' }}>
-                                                                <div style={{ display: 'flex', flexDirection: 'column' }}>
-                                                                    <span style={{ color: pnlValue >= 0 ? '#10b981' : '#ef4444', fontWeight: '600', fontSize: '0.95rem' }}>
-                                                                        {pnlValue >= 0 ? '+' : ''}${pnlValue.toFixed(2)}
-                                                                    </span>
-                                                                    <span style={{ fontSize: '0.75rem', color: pnlValue >= 0 ? '#10b981' : '#ef4444' }}>
-                                                                        ({pnlPercent.toFixed(2)}%)
-                                                                    </span>
-                                                                </div>
-                                                            </td>
-
-                                                            {/* Action - Sell / Claim */}
-                                                            <td style={{ padding: '16px', textAlign: 'right' }}>
-                                                                {isResolved ? (
-                                                                    <button
-                                                                        className="sell-btn"
-                                                                        onClick={() => handleSellClick(bet)}
-                                                                        style={{
-                                                                            background: '#3b82f6',
-                                                                            color: 'white',
-                                                                            border: 'none',
-                                                                            borderRadius: '6px',
-                                                                            padding: '6px 16px',
-                                                                            fontWeight: '600',
-                                                                            cursor: 'pointer',
-                                                                            boxShadow: '0 4px 6px rgba(59, 130, 246, 0.3)'
-                                                                        }}
-                                                                    >
-                                                                        Claim
-                                                                    </button>
-                                                                ) : (
-                                                                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
-                                                                        {/* Receive Info Stack */}
-                                                                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', lineHeight: '1.1' }}>
-                                                                            <span style={{ fontSize: '0.75rem', color: '#94a3b8', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                                                                You'll receive 💸
-                                                                            </span>
-                                                                            <span style={{ fontSize: '1.1rem', fontWeight: '700', color: pnlValue >= 0 ? '#10b981' : '#e2e8f0' }}>
-                                                                                ${(bet.size * (bet.bidPrice || bet.curPrice)).toFixed(2)}
-                                                                            </span>
-                                                                        </div>
-
-                                                                        {/* Big Colored Button */}
-                                                                        <button
-                                                                            className="sell-btn-large"
-                                                                            onClick={() => handleSellClick(bet)}
-                                                                            disabled={!client}
-                                                                            style={{
-                                                                                background: pnlValue >= 0 ? '#16a34a' : '#ef4444',
-                                                                                border: 'none',
-                                                                                borderRadius: '8px',
-                                                                                color: 'white',
-                                                                                padding: '8px 24px',
-                                                                                cursor: client ? 'pointer' : 'not-allowed',
-                                                                                fontWeight: '700',
-                                                                                fontSize: '0.9rem',
-                                                                                boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
-                                                                                transition: 'transform 0.1s',
-                                                                                opacity: client ? 1 : 0.7,
-                                                                                minWidth: '100px'
-                                                                            }}
-                                                                            onMouseOver={(e) => { if (client) e.currentTarget.style.transform = 'scale(1.02)' }}
-                                                                            onMouseOut={(e) => { if (client) e.currentTarget.style.transform = 'scale(1)' }}
-                                                                        >
-                                                                            Sell {bet.outcome}
-                                                                        </button>
-                                                                    </div>
-                                                                )}
-                                                            </td>
-                                                        </tr>
-                                                    )
-                                                })}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                )}
-                            </div>
-                        )}
-
-                        {/* Closed Positions Tab */}
-                        {activeTab === 'closed' && (
-                            <div className="tab-panel">
-                                {closedPositions.length === 0 ? (
-                                    <div className="empty-state">No closed positions found.</div>
-                                ) : (
-                                    <div className="positions-grid">
-                                        {closedPositions.map((position, idx) => (
-                                            <div key={idx} className="position-card">
-                                                <div className="position-header">
-                                                    <h4>{position.title}</h4>
-                                                    <span className={`outcome-badge ${position.outcome.toLowerCase()}`}>
-                                                        {position.outcome}
-                                                    </span>
-                                                </div>
-                                                <div className="position-stats">
-                                                    <div className="stat">
-                                                        <span className="stat-label">P&L</span>
-                                                        <span className={`stat-value ${position.pnl >= 0 ? 'positive' : 'negative'}`}>
-                                                            {formatCurrency(position.pnl)}
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                            </div>
-                        )}
-
-                        {/* Activity Log Tab */}
-                        {activeTab === 'activity' && (
-                            <div className="tab-panel activity-panel">
-                                {activityLog.length === 0 ? (
-                                    <div className="empty-state">No activity found.</div>
-                                ) : (
-                                    <div className="activity-table">
-                                        <div className="activity-header-row">
-                                            <span className="col-activity">ACTIVITY</span>
-                                            <span className="col-market">MARKET</span>
-                                            <span className="col-value">VALUE</span>
-                                        </div>
-                                        {activityLog.map((activity, idx) => {
-                                            const side = activity.side || 'TRADE'
-                                            const type = activity.type || 'TRADE'
-                                            const amount = activity.size || activity.usdcSize || activity.shares
-                                            const timestamp = activity.timestamp || activity.match_time
-                                            const price = activity.price || 0
-                                            const valueChange = (amount * price).toFixed(2)
-
-                                            let icon = '📝'
-                                            let actionText = type
-                                            let actionClass = 'neutral'
-
-                                            if (side === 'BUY') { icon = '➕'; actionText = 'Bought'; actionClass = 'bought' }
-                                            else if (side === 'SELL') { icon = '➖'; actionText = 'Sold'; actionClass = 'sold' }
-                                            if (type === 'REDEEM') { icon = '💰'; actionText = 'Redeemed'; actionClass = 'redeem' }
-
-                                            return (
-                                                <div key={activity.id || idx} className="activity-row">
-                                                    <div className="col-activity">
-                                                        <div className={`activity-icon-badge ${actionClass}`}>{icon}</div>
-                                                        <span className="activity-action-text">{actionText}</span>
-                                                    </div>
-                                                    <div className="col-market">
-                                                        {activity.market?.image && <img src={activity.market.image} alt="" className="market-icon-small" onError={(e) => e.target.style.display = 'none'} />}
-                                                        <div className="market-details">
-                                                            <div className="market-question">{activity.market?.question || activity.title || 'Unknown Market'}</div>
-                                                            <div className="outcome-details">
-                                                                <span className={`outcome-text ${activity.outcome?.toLowerCase()}`}>{activity.outcome}</span>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    <div className="col-value">
-                                                        <div className={`value-text ${side === 'BUY' ? 'negative' : 'positive'}`}>
-                                                            {side === 'BUY' ? '-' : '+'}${formatCurrency(valueChange).replace('$', '')}
-                                                        </div>
-                                                        <div className="time-ago">{timeAgo(timestamp)}</div>
-                                                    </div>
-                                                </div>
-                                            )
-                                        })}
-                                    </div>
-                                )}
-                            </div>
-                        )}
-                    </>
-                )}
-
-                {/* Auto-refresh Toggle - Footer */}
-                <div className="auto-refresh-toggle" style={{ borderTop: '1px solid rgba(255,255,255,0.1)', marginTop: '20px', paddingTop: '20px' }}>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', alignItems: 'center', opacity: apiCreds ? 1 : 0.5, transition: 'opacity 0.3s' }}>
-
-                        {/* Control Row: Toggle + Interval Slider */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '24px', width: '100%', justifyContent: 'center' }}>
-                            {/* Auto-Refresh Toggle */}
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                                <span style={{ fontSize: '1.2rem' }}>
-                                    {autoRefresh ? '🔄' : '⏸'}
-                                </span>
-                                <span style={{
-                                    fontSize: '0.9rem',
-                                    fontWeight: '600',
-                                    color: autoRefresh ? '#10b981' : '#94a3b8',
-                                    transition: 'color 0.3s'
-                                }}>
-                                    {autoRefresh ? 'AUTO-REFRESH ON' : 'AUTO-REFRESH OFF'}
-                                </span>
-
-                                <div style={{ position: 'relative', width: '60px', height: '34px' }}>
-                                    <input
-                                        type="checkbox"
-                                        id="auto-refresh-toggle"
-                                        className="toggle-switch-input"
-                                        checked={autoRefresh}
-                                        onChange={(e) => {
-                                            if (!apiCreds) {
-                                                alert("L2 Authentication required for Auto-Refresh. Please login with API Keys or Private Key.")
-                                                return
-                                            }
-                                            setAutoRefresh(e.target.checked)
+                            <div className="auto-sell-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    <span style={{ fontSize: '1.2rem' }}>🤖</span>
+                                    <h3 style={{ margin: 0, fontSize: '1rem', color: '#e2e8f0' }}>Auto-Sell Bot</h3>
+                                    <button
+                                        onClick={() => setAutoSellHelpOpen(true)}
+                                        style={{
+                                            background: 'rgba(59, 130, 246, 0.2)',
+                                            border: '1px solid rgba(59, 130, 246, 0.4)',
+                                            color: '#60a5fa',
+                                            borderRadius: '50%',
+                                            width: '20px',
+                                            height: '20px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            cursor: 'pointer',
+                                            fontSize: '0.75rem',
+                                            fontWeight: 'bold',
+                                            marginLeft: '4px'
                                         }}
-                                        disabled={!apiCreds}
-                                    />
-                                    <label htmlFor="auto-refresh-toggle" className="toggle-switch-label"></label>
+                                        title="How Auto-Sell Works"
+                                    >
+                                        ?
+                                    </button>
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                    <span style={{
+                                        fontSize: '0.9rem',
+                                        fontWeight: '600',
+                                        color: autoSellEnabled ? '#34d399' : '#94a3b8',
+                                        transition: 'color 0.3s'
+                                    }}>
+                                        {autoSellEnabled ? 'ENABLED' : 'DISABLED'}
+                                    </span>
+                                    <div style={{ position: 'relative', width: '60px', height: '34px' }}>
+                                        <input
+                                            type="checkbox"
+                                            id="auto-sell-toggle"
+                                            className="toggle-switch-input"
+                                            checked={autoSellEnabled}
+                                            onChange={(e) => {
+                                                if (!client && e.target.checked) {
+                                                    toast.error("Login (L2) required for Auto-Sell")
+                                                    return
+                                                }
+                                                setAutoSellEnabled(e.target.checked)
+                                                if (e.target.checked && !liveUpdates) setLiveUpdates(true)
+                                            }}
+                                        />
+                                        <label htmlFor="auto-sell-toggle" className="toggle-switch-label"></label>
+                                    </div>
                                 </div>
                             </div>
 
-                            {/* Refresh Interval Slider */}
-                            {autoRefresh && (
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: '250px' }}>
-                                    <span style={{ fontSize: '0.8rem', color: '#94a3b8', whiteSpace: 'nowrap' }}>
-                                        Refresh every:
-                                    </span>
+                            {/* Controls */}
+                            <div className="auto-sell-controls" style={{
+                                display: 'grid',
+                                gridTemplateColumns: '1fr 1fr 1fr',
+                                gap: '24px',
+                                transition: 'opacity 0.2s'
+                            }}>
+                                {/* Take Profit */}
+                                <div className="control-group">
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                                        <span style={{ color: '#10b981', fontWeight: '600', fontSize: '0.9rem' }}>Take Profit</span>
+                                        <span style={{ color: '#10b981', fontWeight: '700' }}>{takeProfitPercent}%</span>
+                                    </div>
                                     <input
                                         type="range"
-                                        min="100"
-                                        max="3000"
-                                        step="100"
-                                        value={refreshInterval}
-                                        onChange={(e) => setRefreshInterval(Number(e.target.value))}
-                                        style={{ flex: 1, accentColor: '#10b981' }}
+                                        min="1" max="200" step="1"
+                                        value={takeProfitPercent}
+                                        onChange={(e) => setTakeProfitPercent(Number(e.target.value))}
+                                        style={{ width: '100%', accentColor: '#10b981' }}
                                     />
-                                    <span style={{ fontSize: '0.9rem', fontWeight: '700', color: '#10b981', minWidth: '45px' }}>
-                                        {(refreshInterval / 1000).toFixed(1)}s
+                                    <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '4px' }}>
+                                        Sell if profit {'>'} {takeProfitPercent}%
+                                    </div>
+                                </div>
+
+                                {/* Stop Loss */}
+                                <div className="control-group">
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                                        <span style={{ color: '#ef4444', fontWeight: '600', fontSize: '0.9rem' }}>Stop Loss</span>
+                                        <span style={{ color: '#ef4444', fontWeight: '700' }}>-{stopLossPercent}%</span>
+                                    </div>
+                                    <input
+                                        type="range"
+                                        min="1" max="99" step="1"
+                                        value={stopLossPercent}
+                                        onChange={(e) => setStopLossPercent(Number(e.target.value))}
+                                        style={{ width: '100%', accentColor: '#ef4444' }}
+                                    />
+                                    <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '4px' }}>
+                                        Sell if loss {'>'} {stopLossPercent}%
+                                    </div>
+                                </div>
+
+                                {/* Max Spread Tolerance */}
+                                <div className="control-group">
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                        <span style={{ fontSize: '0.9rem', fontWeight: '600', color: '#f59e0b' }}>Max Spread</span>
+                                        <span style={{ color: '#f59e0b', fontWeight: '700' }}>{maxSpreadPercent}%</span>
+                                    </div>
+                                    <input
+                                        type="range"
+                                        min="5" max="80" step="5"
+                                        value={maxSpreadPercent}
+                                        onChange={(e) => setMaxSpreadPercent(Number(e.target.value))}
+                                        style={{ width: '100%', accentColor: '#f59e0b' }}
+                                    />
+                                    <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '4px' }}>
+                                        Skip if spread {'>'} {maxSpreadPercent}%
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {loading ? (
+                        <div className="loading-state">Loading...</div>
+                    ) : (
+                        <>
+                            {/* Active Bets Tab */}
+                            {activeTab === 'active' && (
+                                <div className="tab-panel">
+                                    {activeBets.length === 0 ? (
+                                        <div className="empty-state">No active positions found.</div>
+                                    ) : (
+                                        <div className="positions-table-container" style={{ overflowX: 'auto', background: 'rgba(30, 41, 59, 0.4)', borderRadius: '12px', border: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
+                                                <thead>
+                                                    <tr style={{ color: '#94a3b8', borderBottom: '1px solid #334155', textAlign: 'left', textTransform: 'uppercase', fontSize: '0.75rem' }}>
+                                                        <th style={{ padding: '16px', width: '35%' }}>Market</th>
+                                                        <th style={{ padding: '16px' }}>Qty</th>
+                                                        <th style={{ padding: '16px' }}>Avg &rarr; Now</th>
+                                                        <th style={{ padding: '16px' }}>Value</th>
+                                                        <th style={{ padding: '16px' }}>Return</th>
+                                                        <th style={{ padding: '16px', textAlign: 'right' }}>Action</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {displayedBets.map((bet, idx) => {
+                                                        // Formatting
+                                                        // Formatting helper for precision
+                                                        const formatPrice = (p) => p < 1 ? `${(p * 100).toFixed(1)}¢` : `$${p.toFixed(2)}`
+                                                        const avgPriceDisplay = formatPrice(bet.avgPrice)
+                                                        const curPriceDisplay = formatPrice(bet.curPrice)
+
+                                                        const currentVal = bet.size * bet.curPrice
+                                                        const costBasis = bet.size * bet.avgPrice
+                                                        const pnlValue = currentVal - costBasis
+                                                        const pnlPercent = costBasis > 0 ? (pnlValue / costBasis) * 100 : 0
+                                                        const isResolved = resolvedMarkets.has(bet.conditionId)
+
+                                                        return (
+                                                            <tr key={idx} style={{ borderBottom: '1px solid #334155' }}>
+                                                                {/* Market & Outcome */}
+                                                                <td style={{ padding: '16px' }}>
+                                                                    <div style={{ display: 'flex', gap: '12px' }}>
+                                                                        {bet.icon && (
+                                                                            <img
+                                                                                src={bet.icon}
+                                                                                alt=""
+                                                                                style={{ width: '32px', height: '32px', borderRadius: '6px', marginTop: '2px' }}
+                                                                                onError={(e) => e.target.style.display = 'none'}
+                                                                            />
+                                                                        )}
+                                                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                                                            <span style={{ color: '#e2e8f0', fontWeight: '600', fontSize: '0.9rem', lineHeight: '1.3' }}>
+                                                                                {bet.title}
+                                                                            </span>
+                                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                                                <span className={`outcome-badge ${bet.outcome.toLowerCase()}`} style={{ fontSize: '0.75rem', padding: '2px 8px' }}>
+                                                                                    {bet.outcome}
+                                                                                </span>
+                                                                                {/* Live Indicator */}
+                                                                                {bet.isLive && (
+                                                                                    <span style={{ fontSize: '0.7rem', color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px', background: 'rgba(16, 185, 129, 0.1)', padding: '1px 6px', borderRadius: '4px' }}>
+                                                                                        <span style={{ width: '6px', height: '6px', background: '#10b981', borderRadius: '50%' }}></span>
+                                                                                        LIVE
+                                                                                    </span>
+                                                                                )}
+                                                                                {/* Time Remaining */}
+                                                                                {(bet.endDate || bet.market?.endDate) && (
+                                                                                    <span style={{ fontSize: '0.7rem', color: '#f59e0b', background: 'rgba(245, 158, 11, 0.1)', padding: '1px 6px', borderRadius: '4px', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                                                                                        ⏳ {(() => {
+                                                                                            const end = bet.endDate || bet.market?.endDate;
+
+                                                                                            // Parse end date properly accounting for ET timezone
+                                                                                            // Polymarket times are in ET (UTC-5 in winter, UTC-4 in summer)
+                                                                                            let endTime;
+                                                                                            try {
+                                                                                                endTime = new Date(end);
+
+                                                                                                // If the date string doesn't have timezone info (no 'Z' or offset),
+                                                                                                // it's likely in ET format but parsed as local time
+                                                                                                // We need to add the offset difference between local and ET
+                                                                                                if (!end.includes('Z') && !end.includes('+') && !end.includes('-', 10)) {
+                                                                                                    // Get local timezone offset in minutes
+                                                                                                    const localOffset = new Date().getTimezoneOffset();
+                                                                                                    // ET is UTC-5 (EST) or UTC-4 (EDT)
+                                                                                                    // Assuming EST (UTC-5) = +300 minutes offset from UTC
+                                                                                                    const etOffset = 300; // Eastern Standard Time offset in minutes
+
+                                                                                                    // Adjust: add difference between what JavaScript assumed (local) and what it should be (ET)
+                                                                                                    const offsetDiff = localOffset - etOffset;
+                                                                                                    endTime = new Date(endTime.getTime() + offsetDiff * 60 * 1000);
+                                                                                                }
+                                                                                            } catch (e) {
+                                                                                                return 'Invalid';
+                                                                                            }
+
+                                                                                            const diff = endTime - new Date();
+                                                                                            if (diff <= 0) return 'Ended';
+                                                                                            const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+                                                                                            const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+                                                                                            if (days > 0) return `${days}d ${hours}h`;
+                                                                                            const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+                                                                                            return `${hours}h ${mins}m`;
+                                                                                        })()}
+                                                                                    </span>
+                                                                                )}
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+                                                                </td>
+
+                                                                {/* Qty */}
+                                                                <td style={{ padding: '16px', color: '#e2e8f0', fontSize: '0.95rem' }}>
+                                                                    {bet.size.toFixed(2)}
+                                                                </td>
+
+                                                                {/* Avg -> Now */}
+                                                                <td style={{ padding: '16px', color: '#94a3b8' }}>
+                                                                    <span style={{ color: '#e2e8f0' }}>{avgPriceDisplay}</span>
+                                                                    <span style={{ margin: '0 6px', color: '#64748b' }}>&rarr;</span>
+                                                                    <span style={{ color: bet.curPrice >= bet.avgPrice ? '#10b981' : '#f43f5e' }}>
+                                                                        {curPriceDisplay}
+                                                                    </span>
+                                                                </td>
+
+                                                                {/* Value with Cost Basis */}
+                                                                <td style={{ padding: '16px' }}>
+                                                                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                                                        <span style={{ color: '#e2e8f0', fontWeight: '600', fontSize: '0.95rem' }}>
+                                                                            ${currentVal.toFixed(2)}
+                                                                        </span>
+                                                                        <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                                                                            Cost ${costBasis.toFixed(2)}
+                                                                        </span>
+                                                                        <span style={{ fontSize: '0.75rem', color: '#10b981', marginTop: '2px' }}>
+                                                                            Max ${bet.size.toFixed(2)}
+                                                                        </span>
+                                                                    </div>
+                                                                </td>
+
+                                                                {/* Return */}
+                                                                <td style={{ padding: '16px' }}>
+                                                                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                                                        <span style={{ color: pnlValue >= 0 ? '#10b981' : '#ef4444', fontWeight: '600', fontSize: '0.95rem' }}>
+                                                                            {pnlValue >= 0 ? '+' : ''}${pnlValue.toFixed(2)}
+                                                                        </span>
+                                                                        <span style={{ fontSize: '0.75rem', color: pnlValue >= 0 ? '#10b981' : '#ef4444' }}>
+                                                                            ({pnlPercent.toFixed(2)}%)
+                                                                        </span>
+                                                                    </div>
+                                                                </td>
+
+                                                                {/* Action - Sell / Claim */}
+                                                                <td style={{ padding: '16px', textAlign: 'right' }}>
+                                                                    {isResolved ? (
+                                                                        <button
+                                                                            className="sell-btn"
+                                                                            onClick={() => handleSellClick(bet)}
+                                                                            style={{
+                                                                                background: '#3b82f6',
+                                                                                color: 'white',
+                                                                                border: 'none',
+                                                                                borderRadius: '6px',
+                                                                                padding: '6px 16px',
+                                                                                fontWeight: '600',
+                                                                                cursor: 'pointer',
+                                                                                boxShadow: '0 4px 6px rgba(59, 130, 246, 0.3)'
+                                                                            }}
+                                                                        >
+                                                                            Claim
+                                                                        </button>
+                                                                    ) : (
+                                                                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
+                                                                            {/* Receive Info Stack */}
+                                                                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', lineHeight: '1.1' }}>
+                                                                                <span style={{ fontSize: '0.75rem', color: '#94a3b8', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                                                    You'll receive 💸
+                                                                                </span>
+                                                                                <span style={{ fontSize: '1.1rem', fontWeight: '700', color: pnlValue >= 0 ? '#10b981' : '#e2e8f0' }}>
+                                                                                    ${(bet.size * (bet.bidPrice || bet.curPrice)).toFixed(2)}
+                                                                                </span>
+                                                                            </div>
+
+                                                                            <div style={{ display: 'flex', gap: '8px' }}>
+                                                                                {/* Chart Button */}
+                                                                                <button
+                                                                                    onClick={(e) => {
+                                                                                        e.stopPropagation()
+                                                                                        setSelectedChartAsset({ assetId: bet.asset, title: bet.title })
+                                                                                        setChartOpen(true)
+                                                                                    }}
+                                                                                    style={{
+                                                                                        background: 'rgba(56, 189, 248, 0.15)',
+                                                                                        border: '1px solid rgba(56, 189, 248, 0.3)',
+                                                                                        borderRadius: '8px',
+                                                                                        color: '#38bdf8',
+                                                                                        padding: '8px 12px',
+                                                                                        cursor: 'pointer',
+                                                                                        fontWeight: '600',
+                                                                                        fontSize: '0.9rem',
+                                                                                        display: 'flex',
+                                                                                        alignItems: 'center',
+                                                                                        gap: '4px'
+                                                                                    }}
+                                                                                    title="View Chart"
+                                                                                >
+                                                                                    📊
+                                                                                </button>
+
+                                                                                {/* Big Colored Sell Button */}
+                                                                                <button
+                                                                                    className="sell-btn-large"
+                                                                                    onClick={() => handleSellClick(bet)}
+                                                                                    disabled={!client}
+                                                                                    style={{
+                                                                                        background: pnlValue >= 0 ? '#16a34a' : '#ef4444',
+                                                                                        border: 'none',
+                                                                                        borderRadius: '8px',
+                                                                                        color: 'white',
+                                                                                        padding: '8px 24px',
+                                                                                        cursor: client ? 'pointer' : 'not-allowed',
+                                                                                        fontWeight: '700',
+                                                                                        fontSize: '0.9rem',
+                                                                                        boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+                                                                                        transition: 'transform 0.1s',
+                                                                                        opacity: client ? 1 : 0.7,
+                                                                                        minWidth: '80px'
+                                                                                    }}
+                                                                                    onMouseOver={(e) => { if (client) e.currentTarget.style.transform = 'scale(1.02)' }}
+                                                                                    onMouseOut={(e) => { if (client) e.currentTarget.style.transform = 'scale(1)' }}
+                                                                                >
+                                                                                    Sell
+                                                                                </button>
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+                                                                </td>
+                                                            </tr>
+                                                        )
+                                                    })}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+
+
+                            {/* Activity Log Tab */}
+                            {activeTab === 'activity' && (
+                                <div className="tab-panel activity-panel">
+                                    {activityLog.length === 0 ? (
+                                        <div className="empty-state">No activity found.</div>
+                                    ) : (
+                                        <div className="activity-table">
+                                            <div className="activity-header-row">
+                                                <span className="col-activity">ACTIVITY</span>
+                                                <span className="col-market">MARKET</span>
+                                                <span className="col-value">VALUE</span>
+                                            </div>
+                                            {activityLog.map((activity, idx) => {
+                                                const side = activity.side || 'TRADE'
+                                                const type = activity.type || 'TRADE'
+                                                const amount = activity.size || activity.usdcSize || activity.shares
+                                                const timestamp = activity.timestamp || activity.match_time
+                                                const price = activity.price || 0
+                                                const valueChange = (amount * price).toFixed(2)
+
+                                                let icon = '📝'
+                                                let actionText = type
+                                                let actionClass = 'neutral'
+
+                                                if (side === 'BUY') { icon = '➕'; actionText = 'Bought'; actionClass = 'bought' }
+                                                else if (side === 'SELL') { icon = '➖'; actionText = 'Sold'; actionClass = 'sold' }
+                                                if (type === 'REDEEM') { icon = '💰'; actionText = 'Redeemed'; actionClass = 'redeem' }
+
+                                                return (
+                                                    <div key={activity.id || idx} className="activity-row">
+                                                        <div className="col-activity">
+                                                            <div className={`activity-icon-badge ${actionClass}`}>{icon}</div>
+                                                            <span className="activity-action-text">{actionText}</span>
+                                                        </div>
+                                                        <div className="col-market">
+                                                            {activity.market?.image && <img src={activity.market.image} alt="" className="market-icon-small" onError={(e) => e.target.style.display = 'none'} />}
+                                                            <div className="market-details">
+                                                                <div className="market-question">{activity.market?.question || activity.title || 'Unknown Market'}</div>
+                                                                <div className="outcome-details">
+                                                                    <span className={`outcome-text ${activity.outcome?.toLowerCase()}`}>{activity.outcome}</span>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                        <div className="col-value">
+                                                            <div className={`value-text ${side === 'BUY' ? 'negative' : 'positive'}`}>
+                                                                {side === 'BUY' ? '-' : '+'}${formatCurrency(valueChange).replace('$', '')}
+                                                            </div>
+                                                            <div className="time-ago">{timeAgo(timestamp)}</div>
+                                                        </div>
+                                                    </div>
+                                                )
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Copy Trading Bot Tab */}
+                            {activeTab === 'copy-bot' && (
+                                <div className="tab-panel copy-bot-panel" style={{ color: '#e2e8f0' }}>
+                                    <div style={{ background: 'rgba(30, 41, 59, 0.4)', borderRadius: '12px', padding: '20px', border: '1px solid rgba(255, 255, 255, 0.05)' }}>
+
+                                        {/* Header / Status */}
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
+                                            <div>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                    <h3 style={{ margin: 0, fontSize: '1.2rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                        👯 Copy Trading Bot
+                                                        {copyBotRunning && <span className="live-indicator">● LIVE</span>}
+                                                    </h3>
+                                                    <button
+                                                        onClick={() => setCopyBotHelpOpen(true)}
+                                                        style={{
+                                                            background: 'rgba(56, 189, 248, 0.2)',
+                                                            border: '1px solid rgba(56, 189, 248, 0.4)',
+                                                            color: '#38bdf8',
+                                                            borderRadius: '50%',
+                                                            width: '20px',
+                                                            height: '20px',
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            justifyContent: 'center',
+                                                            cursor: 'pointer',
+                                                            fontSize: '0.75rem',
+                                                            fontWeight: 'bold',
+                                                            marginLeft: '4px'
+                                                        }}
+                                                        title="How Copy Bot Works"
+                                                    >
+                                                        ?
+                                                    </button>
+                                                </div>
+                                                <p style={{ margin: '4px 0 0', color: '#94a3b8', fontSize: '0.9rem' }}>
+                                                    {copyBotRunning
+                                                        ? 'Monitoring traders and mirroring trades...'
+                                                        : 'Add traders and click Start to begin.'}
+                                                </p>
+                                            </div>
+                                            <button
+                                                onClick={() => {
+                                                    if (!copyBotRunning) setBotStartTime(new Date())
+                                                    setCopyBotRunning(!copyBotRunning)
+                                                }}
+                                                style={{
+                                                    background: copyBotRunning ? '#ef4444' : '#10b981',
+                                                    color: 'white',
+                                                    border: 'none',
+                                                    padding: '10px 24px',
+                                                    borderRadius: '8px',
+                                                    fontWeight: 'bold',
+                                                    cursor: 'pointer',
+                                                    fontSize: '1rem',
+                                                    boxShadow: '0 4px 6px rgba(0,0,0,0.2)'
+                                                }}
+                                            >
+                                                {copyBotRunning ? 'STOP BOT' : 'START BOT'}
+                                            </button>
+                                        </div>
+
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                                            {/* Left Column: Traders & Settings */}
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+
+                                                {/* Settings Card */}
+                                                <div className="card-bg" style={{ background: 'rgba(15, 23, 42, 0.6)', padding: '16px', borderRadius: '8px', border: '1px solid #334155' }}>
+                                                    <h4 style={{ marginTop: 0, color: '#f59e0b' }}>⚙️ Settings</h4>
+                                                    <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+                                                        <div style={{ flex: 1 }}>
+                                                            <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '4px' }}>Fixed Amount ($)</label>
+                                                            <input
+                                                                type="number"
+                                                                value={copySettings.fixedAmount}
+                                                                onChange={(e) => setCopySettings({ ...copySettings, fixedAmount: parseFloat(e.target.value) })}
+                                                                style={{ width: '100%', background: '#1e293b', border: '1px solid #475569', color: 'white', padding: '8px', borderRadius: '4px' }}
+                                                            />
+                                                        </div>
+                                                        <div style={{ flex: 1 }}>
+                                                            <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '4px' }}>Max Spread (%)</label>
+                                                            <input
+                                                                type="number"
+                                                                value={copySettings.maxSpread}
+                                                                onChange={(e) => setCopySettings({ ...copySettings, maxSpread: parseFloat(e.target.value) })}
+                                                                style={{ width: '100%', background: '#1e293b', border: '1px solid #475569', color: 'white', padding: '8px', borderRadius: '4px' }}
+                                                            />
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                {/* Traders Manager */}
+                                                <div className="card-bg" style={{ background: 'rgba(15, 23, 42, 0.6)', padding: '16px', borderRadius: '8px', border: '1px solid #334155' }}>
+                                                    <h4 style={{ marginTop: 0, color: '#38bdf8' }}>👥 Target Traders</h4>
+                                                    <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+                                                        <input
+                                                            type="text"
+                                                            placeholder="0x... or Profile ID"
+                                                            value={newTraderInput}
+                                                            onChange={(e) => setNewTraderInput(e.target.value)}
+                                                            style={{ flex: 1, background: '#1e293b', border: '1px solid #475569', color: 'white', padding: '8px', borderRadius: '4px' }}
+                                                        />
+                                                        <button
+                                                            onClick={() => {
+                                                                if (newTraderInput && !copyTraders.includes(newTraderInput)) {
+                                                                    setCopyTraders([...copyTraders, newTraderInput])
+                                                                    setNewTraderInput('')
+                                                                }
+                                                            }}
+                                                            style={{ background: '#3b82f6', color: 'white', border: 'none', padding: '0 16px', borderRadius: '4px', cursor: 'pointer' }}
+                                                        >
+                                                            Add
+                                                        </button>
+                                                    </div>
+
+                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                                        {copyTraders.length === 0 && <span style={{ color: '#64748b', fontSize: '0.9rem', fontStyle: 'italic' }}>No traders added yet.</span>}
+                                                        {copyTraders.map(trader => (
+                                                            <div key={trader} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255,255,255,0.05)', padding: '8px 12px', borderRadius: '4px' }}>
+                                                                <span style={{ fontFamily: 'monospace', fontSize: '0.9rem' }}>{trader}</span>
+                                                                <button
+                                                                    onClick={() => setCopyTraders(copyTraders.filter(t => t !== trader))}
+                                                                    style={{ background: 'transparent', color: '#ef4444', border: 'none', cursor: 'pointer', fontSize: '1.2rem' }}
+                                                                >
+                                                                    &times;
+                                                                </button>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+
+                                            </div>
+
+                                            {/* Right Column: Logs */}
+                                            <div className="card-bg" style={{ background: 'rgba(15, 23, 42, 0.6)', padding: '16px', borderRadius: '8px', border: '1px solid #334155', display: 'flex', flexDirection: 'column' }}>
+                                                <h4 style={{ marginTop: 0, color: '#94a3b8' }}>📜 Bot Logs</h4>
+                                                <div style={{ flex: 1, overflowY: 'auto', maxHeight: '400px', background: 'rgba(0,0,0,0.3)', borderRadius: '4px', padding: '12px', fontFamily: 'monospace', fontSize: '0.85rem', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                    {copyLogs.length === 0 && <span style={{ color: '#64748b' }}>Waiting for activity...</span>}
+                                                    {copyLogs.map((log, i) => (
+                                                        <div key={i} style={{ color: log.includes('Success') ? '#4ade80' : log.includes('Error') || log.includes('Failed') ? '#f87171' : '#e2e8f0' }}>
+                                                            {log}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Risk Calculator Tab */}
+                            {activeTab === 'calculator' && (
+                                <RiskCalculator cashBalance={cashBalance} />
+                            )}
+                        </>
+                    )}
+
+                    {/* Auto-refresh Toggle - Footer */}
+                    <div className="auto-refresh-toggle" style={{ borderTop: '1px solid rgba(255,255,255,0.1)', marginTop: '20px', paddingTop: '20px' }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', alignItems: 'center', opacity: apiCreds ? 1 : 0.5, transition: 'opacity 0.3s' }}>
+
+                            {/* Control Row: Toggle + Interval Slider */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '24px', width: '100%', justifyContent: 'center' }}>
+                                {/* Auto-Refresh Toggle */}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                    <span style={{ fontSize: '1.2rem' }}>
+                                        {autoRefresh ? '🔄' : '⏸'}
                                     </span>
+                                    <span style={{
+                                        fontSize: '0.9rem',
+                                        fontWeight: '600',
+                                        color: autoRefresh ? '#10b981' : '#94a3b8',
+                                        transition: 'color 0.3s'
+                                    }}>
+                                        {autoRefresh ? 'AUTO-REFRESH ON' : 'AUTO-REFRESH OFF'}
+                                    </span>
+
+                                    <div style={{ position: 'relative', width: '60px', height: '34px' }}>
+                                        <input
+                                            type="checkbox"
+                                            id="auto-refresh-toggle"
+                                            className="toggle-switch-input"
+                                            checked={autoRefresh}
+                                            onChange={(e) => {
+                                                if (!apiCreds) {
+                                                    alert("L2 Authentication required for Auto-Refresh. Please login with API Keys or Private Key.")
+                                                    return
+                                                }
+                                                setAutoRefresh(e.target.checked)
+                                            }}
+                                            disabled={!apiCreds}
+                                        />
+                                        <label htmlFor="auto-refresh-toggle" className="toggle-switch-label"></label>
+                                    </div>
+                                </div>
+
+                                {/* Refresh Interval Slider */}
+                                {autoRefresh && (
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: '250px' }}>
+                                        <span style={{ fontSize: '0.8rem', color: '#94a3b8', whiteSpace: 'nowrap' }}>
+                                            Refresh every:
+                                        </span>
+                                        <input
+                                            type="range"
+                                            min="100"
+                                            max="3000"
+                                            step="100"
+                                            value={refreshInterval}
+                                            onChange={(e) => setRefreshInterval(Number(e.target.value))}
+                                            style={{ flex: 1, accentColor: '#10b981' }}
+                                        />
+                                        <span style={{ fontSize: '0.9rem', fontWeight: '700', color: '#10b981', minWidth: '45px' }}>
+                                            {(refreshInterval / 1000).toFixed(1)}s
+                                        </span>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Status Display */}
+                            {autoRefresh && (
+                                <div style={{ fontSize: '0.75rem', color: '#64748b', textAlign: 'center' }}>
+                                    🔄 Refreshing positions every <span style={{ color: '#10b981', fontWeight: '600' }}>{(refreshInterval / 1000).toFixed(1)} second{refreshInterval !== 1000 ? 's' : ''}</span>
+                                    {lastUpdateTime && (
+                                        <span style={{ marginLeft: '12px', color: '#94a3b8' }}>
+                                            • Last: {(() => {
+                                                const sec = Math.floor((Date.now() - lastUpdateTime) / 1000);
+                                                return sec === 0 ? 'just now' : `${sec}s ago`;
+                                            })()}
+                                        </span>
+                                    )}
                                 </div>
                             )}
                         </div>
-
-                        {/* Status Display */}
-                        {autoRefresh && (
-                            <div style={{ fontSize: '0.75rem', color: '#64748b', textAlign: 'center' }}>
-                                🔄 Refreshing positions every <span style={{ color: '#10b981', fontWeight: '600' }}>{(refreshInterval / 1000).toFixed(1)} second{refreshInterval !== 1000 ? 's' : ''}</span>
-                                {lastUpdateTime && (
-                                    <span style={{ marginLeft: '12px', color: '#94a3b8' }}>
-                                        • Last: {(() => {
-                                            const sec = Math.floor((Date.now() - lastUpdateTime) / 1000);
-                                            return sec === 0 ? 'just now' : `${sec}s ago`;
-                                        })()}
-                                    </span>
-                                )}
-                            </div>
-                        )}
                     </div>
                 </div>
             </div>
@@ -1648,7 +2015,188 @@ const PortfolioTabs = ({
                     </div>
                 )}
             </ConfirmModal>
-        </div>
+
+            {/* Candle Chart Modal */}
+            {chartOpen && selectedChartAsset && (
+                <CandleChart
+                    assetId={selectedChartAsset.assetId}
+                    title={selectedChartAsset.title}
+                    onClose={() => {
+                        setChartOpen(false)
+                        setSelectedChartAsset(null)
+                    }}
+                />
+            )}
+            {/* Auto-Sell Help Modal */}
+            {autoSellHelpOpen && (
+                <div style={{
+                    position: 'fixed',
+                    top: 0, left: 0, right: 0, bottom: 0,
+                    backgroundColor: 'rgba(0,0,0,0.8)',
+                    display: 'flex',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    zIndex: 10000
+                }} onClick={() => setAutoSellHelpOpen(false)}>
+                    <div style={{
+                        width: '90%',
+                        maxWidth: '550px',
+                        maxHeight: '90vh',
+                        overflowY: 'auto',
+                        backgroundColor: '#0f172a',
+                        borderRadius: '16px',
+                        padding: '32px',
+                        position: 'relative',
+                        border: '1px solid #334155',
+                        boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)'
+                    }} onClick={e => e.stopPropagation()}>
+
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '24px' }}>
+                            <h3 style={{ fontSize: '1.5rem', fontWeight: 'bold', color: 'white', margin: 0 }}>
+                                🤖 How Auto-Sell Works
+                            </h3>
+                            <button
+                                onClick={() => setAutoSellHelpOpen(false)}
+                                style={{
+                                    background: 'transparent',
+                                    border: 'none',
+                                    color: '#94a3b8',
+                                    fontSize: '1.5rem',
+                                    cursor: 'pointer',
+                                    padding: '4px'
+                                }}
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        <div style={{ color: '#cbd5e1', lineHeight: '1.6' }}>
+                            <div style={{ marginBottom: '24px' }}>
+                                <p style={{ fontSize: '1rem', marginBottom: '16px' }}>
+                                    The Auto-Sell Bot monitors your active positions every few seconds and automatically sells them if your profit or loss hits the targets you set.
+                                </p>
+                            </div>
+
+                            <div style={{ marginBottom: '24px' }}>
+                                <h4 style={{ color: '#10b981', fontSize: '1.1rem', marginBottom: '8px' }}>💰 Take Profit (+%)</h4>
+                                <p style={{ margin: 0, fontSize: '0.95rem' }}>
+                                    Triggers a sell if your gain exceeds this percentage. Example: If set to +50%, a $10 bet will be sold when it's worth $15 or more.
+                                </p>
+                            </div>
+
+                            <div style={{ marginBottom: '24px' }}>
+                                <h4 style={{ color: '#ef4444', fontSize: '1.1rem', marginBottom: '8px' }}>🛑 Stop Loss (-%)</h4>
+                                <p style={{ margin: 0, fontSize: '0.95rem' }}>
+                                    Triggers a sell if your loss exceeds this percentage to protect your capital. Example: If set to -10%, a $10 bet will be sold if it drops below $9.
+                                </p>
+                            </div>
+
+                            <div style={{ marginBottom: '24px' }}>
+                                <h4 style={{ color: '#f59e0b', fontSize: '1.1rem', marginBottom: '8px' }}>↔️ Max Spread Safety</h4>
+                                <p style={{ margin: 0, fontSize: '0.95rem' }}>
+                                    Buying/Selling in very thin markets can be costly. This setting <strong>prevents</strong> the bot from selling if the difference between Buy/Sell prices (the spread) is too wide (e.g., &gt;20%).
+                                </p>
+                                <p style={{ fontSize: '0.9rem', color: '#94a3b8', marginTop: '4px' }}>
+                                    <em>This ensures you don't get a bad deal just to exit a trade.</em>
+                                </p>
+                            </div>
+
+                            <div style={{ background: 'rgba(51, 65, 85, 0.3)', padding: '16px', borderRadius: '8px', border: '1px solid rgba(51, 65, 85, 0.5)' }}>
+                                <h4 style={{ color: '#e2e8f0', fontSize: '1rem', marginTop: 0, marginBottom: '8px' }}>🚀 Important Note</h4>
+                                <p style={{ margin: 0, fontSize: '0.9rem' }}>
+                                    You must keep this tab <strong>OPEN</strong> for the bot to run. If you close the browser, monitoring stops.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Copy Bot Help Modal */}
+            {copyBotHelpOpen && (
+                <div style={{
+                    position: 'fixed',
+                    top: 0, left: 0, right: 0, bottom: 0,
+                    backgroundColor: 'rgba(0,0,0,0.8)',
+                    display: 'flex',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    zIndex: 9999999
+                }} onClick={() => setCopyBotHelpOpen(false)}>
+                    <div style={{
+                        width: '90%',
+                        maxWidth: '550px',
+                        maxHeight: '90vh',
+                        overflowY: 'auto',
+                        backgroundColor: '#0f172a',
+                        borderRadius: '16px',
+                        padding: '32px',
+                        position: 'relative',
+                        border: '1px solid #334155',
+                        boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)'
+                    }} onClick={e => e.stopPropagation()}>
+
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '24px' }}>
+                            <h3 style={{ fontSize: '1.5rem', fontWeight: 'bold', color: 'white', margin: 0 }}>
+                                👯 Copy Bot Guide
+                            </h3>
+                            <button
+                                onClick={() => setCopyBotHelpOpen(false)}
+                                style={{
+                                    background: 'transparent',
+                                    border: 'none',
+                                    color: '#94a3b8',
+                                    fontSize: '1.5rem',
+                                    cursor: 'pointer',
+                                    padding: '4px'
+                                }}
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        <div style={{ color: '#cbd5e1', lineHeight: '1.6' }}>
+                            <div style={{ marginBottom: '24px' }}>
+                                <p style={{ fontSize: '1rem', marginBottom: '16px' }}>
+                                    The Copy Trading Bot allows you to automatically mirror the trades of successful Polymarket users.
+                                </p>
+                            </div>
+
+                            <div style={{ marginBottom: '24px' }}>
+                                <h4 style={{ color: '#38bdf8', fontSize: '1.1rem', marginBottom: '8px' }}>1. Find a Trader</h4>
+                                <p style={{ margin: 0, fontSize: '0.95rem' }}>
+                                    Find a user you want to copy (e.g., from the Leaderboard or Activity log). Copy their <strong>Address (0x...)</strong> or <strong>Profile ID</strong>.
+                                </p>
+                            </div>
+
+                            <div style={{ marginBottom: '24px' }}>
+                                <h4 style={{ color: '#f59e0b', fontSize: '1.1rem', marginBottom: '8px' }}>2. Configure Settings</h4>
+                                <ul style={{ margin: '0 0 0 20px', padding: 0, fontSize: '0.95rem' }}>
+                                    <li style={{ marginBottom: '8px' }}><strong>Fixed Amount:</strong> The amount of USDC you want to spend on each copied trade (e.g., $10).</li>
+                                    <li><strong>Max Spread:</strong> Safety filter. If the market spread is wider than this %, the bot will skip the trade to avoid bad prices.</li>
+                                </ul>
+                            </div>
+
+                            <div style={{ marginBottom: '24px' }}>
+                                <h4 style={{ color: '#10b981', fontSize: '1.1rem', marginBottom: '8px' }}>3. Start the Bot</h4>
+                                <p style={{ margin: 0, fontSize: '0.95rem' }}>
+                                    Click <strong>START BOT</strong>. The bot will poll for new activity every 5 seconds.
+                                </p>
+                            </div>
+
+                            <div style={{ background: 'rgba(239, 68, 68, 0.15)', padding: '16px', borderRadius: '8px', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                                <h4 style={{ color: '#fca5a5', fontSize: '1rem', marginTop: 0, marginBottom: '8px' }}>⚠️ Requirements</h4>
+                                <p style={{ margin: 0, fontSize: '0.9rem', color: '#fecaca' }}>
+                                    1. You must keep this browser tab <strong>OPEN</strong>.
+                                    <br />
+                                    2. You must be <strong>logged in</strong> (L2/Proxy) to execute trades.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </>
     )
 }
 

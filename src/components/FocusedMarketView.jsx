@@ -60,8 +60,13 @@ const FocusedMarketView = ({ event, client, userAddress, positions = [] }) => {
     // View State
     const [chartType, setChartType] = useState('asset') // 'asset' | 'outcome'
 
+    // Help State
+    const [marketBuyHelpOpen, setMarketBuyHelpOpen] = useState(false)
+
     // Countdown State
     const [timeLeft, setTimeLeft] = useState('')
+
+
 
     // 1. PARSE METADATA & SYMBOL
     useEffect(() => {
@@ -1258,6 +1263,91 @@ const FocusedMarketView = ({ event, client, userAddress, positions = [] }) => {
                     </div>
                 )}
             </ConfirmModal>
+            {/* Help Modal for Market Buy */}
+            {marketBuyHelpOpen && (
+                <div style={{
+                    position: 'fixed',
+                    top: 0, left: 0, right: 0, bottom: 0,
+                    backgroundColor: 'rgba(0,0,0,0.8)',
+                    display: 'flex',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    zIndex: 10000
+                }} onClick={() => setMarketBuyHelpOpen(false)}>
+                    <div style={{
+                        width: '90%',
+                        maxWidth: '550px',
+                        maxHeight: '90vh',
+                        overflowY: 'auto',
+                        backgroundColor: '#0f172a',
+                        borderRadius: '16px',
+                        padding: '32px',
+                        position: 'relative',
+                        border: '1px solid #334155',
+                        boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)'
+                    }} onClick={e => e.stopPropagation()}>
+
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '24px' }}>
+                            <h3 style={{ fontSize: '1.5rem', fontWeight: 'bold', color: 'white', margin: 0 }}>
+                                🛒 How Buying Works
+                            </h3>
+                            <button
+                                onClick={() => setMarketBuyHelpOpen(false)}
+                                style={{
+                                    background: 'transparent',
+                                    border: 'none',
+                                    color: '#94a3b8',
+                                    fontSize: '1.5rem',
+                                    cursor: 'pointer',
+                                    padding: '4px'
+                                }}
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        <div style={{ color: '#cbd5e1', lineHeight: '1.6' }}>
+                            <div style={{ marginBottom: '24px' }}>
+                                <p style={{ fontSize: '1rem', marginBottom: '16px' }}>
+                                    These buttons allow you to quickly enter a position. You are placing a <strong>Market Order</strong>, which means you buy immediately at the best available price.
+                                </p>
+                            </div>
+
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '24px' }}>
+                                <div style={{ background: 'rgba(16, 185, 129, 0.1)', padding: '16px', borderRadius: '8px', border: '1px solid rgba(16, 185, 129, 0.2)' }}>
+                                    <h4 style={{ color: '#10b981', fontSize: '1.1rem', marginTop: 0, marginBottom: '8px' }}>🚀 Aggressive</h4>
+                                    <p style={{ margin: 0, fontSize: '0.9rem' }}>
+                                        <strong>Instant Buy.</strong> No confirmation modal. Best for catching fast moves.
+                                        <br />
+                                        <span style={{ fontSize: '0.8rem', opacity: 0.8 }}>(Careful: Slippage/Fees apply)</span>
+                                    </p>
+                                </div>
+                                <div style={{ background: 'rgba(59, 130, 246, 0.1)', padding: '16px', borderRadius: '8px', border: '1px solid rgba(59, 130, 246, 0.2)' }}>
+                                    <h4 style={{ color: '#60a5fa', fontSize: '1.1rem', marginTop: 0, marginBottom: '8px' }}>🛡 Passive</h4>
+                                    <p style={{ margin: 0, fontSize: '0.9rem' }}>
+                                        <strong>Limit Order at Bid.</strong> You join the queue as a "Maker".
+                                        <br />
+                                        <span style={{ fontSize: '0.8rem', opacity: 0.8 }}>(Lower fees, but might not fill if price moves away)</span>
+                                    </p>
+                                </div>
+                            </div>
+
+                            <div style={{ marginBottom: '16px' }}>
+                                <h4 style={{ color: '#f59e0b', fontSize: '1rem', marginBottom: '8px' }}>⚙️ Trade Amount</h4>
+                                <p style={{ margin: 0, fontSize: '0.95rem' }}>
+                                    The slider controls how much <strong>USDC</strong> you want to spend (e.g., $10, $50).
+                                </p>
+                            </div>
+
+                            <div style={{ background: 'rgba(51, 65, 85, 0.3)', padding: '12px', borderRadius: '8px', border: '1px solid rgba(51, 65, 85, 0.5)' }}>
+                                <p style={{ margin: 0, fontSize: '0.85rem', color: '#94a3b8' }}>
+                                    💡 <strong>Tip:</strong> Use "Aggressive" when you just want in <em>now</em>. Use "Passive" if you're patient and want to save on fees.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div >
     )
 }
