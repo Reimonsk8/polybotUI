@@ -604,3 +604,41 @@
         align-items: center;
     }
 }
+
+/* Custom Toggle Switch */
+.toggle-switch-input {
+    display: none;
+}
+
+.toggle-switch-label {
+    position: relative;
+    display: inline-block;
+    width: 60px;
+    height: 34px;
+    background-color: #334155; /* Darker default state */
+    border-radius: 34px;
+    transition: background 0.4s;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.toggle-switch-label::after {
+    content: "";
+    position: absolute;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background-color: white;
+    top: 4px;
+    left: 4px;
+    transition: transform 0.4s cubic-bezier(0.4, 0.0, 0.2, 1);
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
+}
+
+.toggle-switch-input:checked + .toggle-switch-label {
+    background: linear-gradient(135deg, #34d399 0%, #0ea5e9 100%); /* Teal to Blue gradient */
+}
+
+.toggle-switch-input:checked + .toggle-switch-label::after {
+    transform: translateX(26px);
+}

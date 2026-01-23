@@ -2,9 +2,10 @@ import { useState, useEffect, useRef } from 'react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceLine } from 'recharts'
 import { toast } from 'react-toastify'
 import ConfirmModal from './Portfolio/ConfirmModal'
+import { placeMarketOrder, getSyncedNonce } from '../utils/marketOrders'
 import './FocusedMarketView.css'
 
-const FocusedMarketView = ({ event, client, userAddress }) => {
+const FocusedMarketView = ({ event, client, userAddress, positions = [] }) => {
     const market = event.markets?.[0]
     const outcomes = JSON.parse(market?.outcomes || '[]')
 
@@ -16,6 +17,25 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
         down: { bid: 0, ask: 0, last: 0, bidSize: 0, askSize: 0 }
     })
     const [tradeAmount, setTradeAmount] = useState(10) // Default trade amount
+
+    // Auto-Buy State
+    const [autoBuy, setAutoBuy] = useState({
+        up: { active: false, targetReturn: '' },
+        down: { active: false, targetReturn: '' }
+    })
+
+    // State Ref for WebSocket (Zero Latency Access)
+    const stateRef = useRef({ autoBuy, tradeAmount, client })
+    useEffect(() => { stateRef.current = { autoBuy, tradeAmount, client } }, [autoBuy, tradeAmount, client])
+
+    // Trigger Lock (Prevent 42x Fires)
+    const triggerLockRef = useRef({ up: false, down: false })
+
+    // Reset lock when re-enbled
+    useEffect(() => {
+        if (autoBuy.up.active) triggerLockRef.current.up = false
+        if (autoBuy.down.active) triggerLockRef.current.down = false
+    }, [autoBuy])
 
     // Trading Flow State
     const [confirmModalOpen, setConfirmModalOpen] = useState(false)
@@ -130,29 +150,71 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                     const bestAskObj = data.asks.reduce((curr, a) =>
                         parseFloat(a.price) < parseFloat(curr.price) ? a : curr
                         , data.asks[0])
-                    addUpdate(type, 'ask', bestAskObj.price)
+                    const bestAskPrice = parseFloat(bestAskObj.price)
+                    addUpdate(type, 'ask', bestAskPrice)
                     addUpdate(type, 'askSize', bestAskObj.size)
+
+                    // SUPER FAST AUTO-BUY CHECK (Zero Latency)
+                    const currentAutoBuy = stateRef.current.autoBuy
+                    const config = type === 'up' ? currentAutoBuy.up : currentAutoBuy.down
+                    const isLocked = type === 'up' ? triggerLockRef.current.up : triggerLockRef.current.down
+
+                    if (config.active && config.targetReturn && bestAskPrice > 0 && !isLocked) {
+                        const potentialReturn = 1 / bestAskPrice
+
+                        // Debug log every update to verify it's checking
+                        // console.log(`[AutoBuy Check] ${type} Return: ${potentialReturn.toFixed(2)}x vs Target: ${config.targetReturn}x | Locked: ${isLocked}`)
+
+                        if (potentialReturn >= parseFloat(config.targetReturn)) {
+
+                            // Check Client FIRST before locking
+                            const { tradeAmount, client } = stateRef.current
+                            if (!client) {
+                                // Don't lock, just warn once per frequent interval? 
+                                // Actually better to trigger notification and maybe disable? 
+                                // For now, just toast and don't lock, so it retries when connected.
+                                console.warn("Auto-Buy Triggered but Client not connected")
+                                return
+                            }
+
+                            // SYNC LOCK IMMEDIATELY
+                            if (type === 'up') triggerLockRef.current.up = true
+                            else triggerLockRef.current.down = true
+
+                            // TRIGGER MATCHED!
+                            console.log(`[AutoBuy] Triggered ${type.toUpperCase()} at ${potentialReturn.toFixed(2)}x (Price: ${bestAskPrice})`)
+
+                            const outcomeIndex = type === 'up' ? 0 : 1
+                            const tradeObj = {
+                                strategy: 'AGGRESSIVE',
+                                side: 'BUY',
+                                outcomeName: outcomes[outcomeIndex],
+                                outcomeIndex,
+                                tokenId: tIds[outcomeIndex], // Use tIds passed to function
+                                price: bestAskPrice,
+                                worstCasePrice: 0.99,
+                                shares: tradeAmount / bestAskPrice,
+                                estCost: tradeAmount,
+                                timestamp: Date.now()
+                            }
+
+                            // Execute Interaction-Free
+                            confirmTrade(tradeObj)
+
+                            // Disable Trigger in State (React Update)
+                            setAutoBuy(prev => ({
+                                ...prev,
+                                [type]: { ...prev[type], active: false }
+                            }))
+
+                            toast.success(`🚀 Auto-Buy Fired! ${potentialReturn.toFixed(2)}x`)
+                        }
+                    }
                 }
             }
         }
 
-        if (Object.keys(updates).length > 0) {
-            setLivePrices(prev => {
-                const next = { ...prev }
-                if (updates.up) next.up = { ...next.up, ...updates.up }
-                if (updates.down) next.down = { ...next.down, ...updates.down }
-
-                // Update Chart History if prices changed
-                const uLast = next.up.last || prev.up.last
-                const dLast = next.down.last || prev.down.last
-
-                // Only update history if LAST price changed or it's empty
-                if (updates.up?.last || updates.down?.last) {
-                    setPriceHistory(h => [...h, { time: new Date().toLocaleTimeString(), timestamp: Date.now(), upPrice: uLast, downPrice: dLast }].slice(-50))
-                }
-                return next
-            })
-        }
+        return updates
     }
 
     // Connect Market WS
@@ -183,12 +245,42 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
             try {
                 const raw = JSON.parse(e.data)
                 const msgs = Array.isArray(raw) ? raw : [raw]
-                msgs.forEach(m => processOutcomeMessage(m, tokenIds))
+
+                let combinedUpdates = {} // { up: {}, down: {} }
+
+                msgs.forEach(m => {
+                    const u = processOutcomeMessage(m, tokenIds)
+                    if (u) {
+                        if (u.up) combinedUpdates.up = { ...(combinedUpdates.up || {}), ...u.up }
+                        if (u.down) combinedUpdates.down = { ...(combinedUpdates.down || {}), ...u.down }
+                    }
+                })
+
+                if (Object.keys(combinedUpdates).length > 0) {
+                    setLivePrices(prev => {
+                        const next = { ...prev }
+                        if (combinedUpdates.up) next.up = { ...next.up, ...combinedUpdates.up }
+                        if (combinedUpdates.down) next.down = { ...next.down, ...combinedUpdates.down }
+
+                        // Update Chart History
+                        const uLast = next.up.last || prev.up.last
+                        const dLast = next.down.last || prev.down.last
+
+                        if (combinedUpdates.up?.last || combinedUpdates.down?.last) {
+                            setPriceHistory(h => [...h, { time: new Date().toLocaleTimeString(), timestamp: Date.now(), upPrice: uLast, downPrice: dLast }].slice(-50))
+                        }
+                        return next
+                    })
+                }
             } catch (e) { }
         }
 
         ws.onclose = () => setIsConnected(false)
-        return () => ws.close()
+        return () => {
+            if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+                ws.close()
+            }
+        }
     }, [market?.conditionId])
 
 
@@ -396,7 +488,7 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
             let shares = tradeAmount / estPrice
             if (shares * estPrice < 1.0001) shares = 1.0001 / estPrice // Min size check
 
-            setPendingTrade({
+            const tradeObj = {
                 strategy,
                 side: 'BUY',
                 outcomeName,
@@ -407,8 +499,16 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                 shares,
                 estCost: shares * estPrice,
                 timestamp: Date.now()
-            })
-            setConfirmModalOpen(true)
+            }
+
+            if (strategy === 'AGGRESSIVE') {
+                // INSTANT EXECUTION (Bypass Modal & State Delay)
+                confirmTrade(tradeObj)
+            } else {
+                // STANDARD FLOW (Modal)
+                setPendingTrade(tradeObj)
+                setConfirmModalOpen(true)
+            }
 
         } catch (e) {
             toast.error(`Cannot initiate trade: ${e.message}`)
@@ -423,8 +523,11 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
         return () => { isSubmittingRef.current = false }
     }, [])
 
-    const confirmTrade = async () => {
-        if (!pendingTrade || !client) return
+    const confirmTrade = async (tradeOverride = null) => {
+        // Use override if provided (Fast Buy), else use State (Modal Confirm)
+        const currentTrade = tradeOverride || pendingTrade
+        const activeClient = stateRef.current.client || client // Use Fresh Client
+        if (!currentTrade || !activeClient) return
 
         // 1. MUTEX LOCK
         if (isSubmittingRef.current) return
@@ -432,59 +535,51 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
 
         setConfirmModalOpen(false)
         setOrderStatus('SUBMITTING')
-        const toastId = toast.loading(`Submitting ${pendingTrade.side} Order...`)
+        const toastId = toast.loading(`Submitting ${currentTrade.side} Order...`)
 
         try {
             // 2. SAFETY CHECK: Re-verify Market Conditions
-            const book = await client.getOrderBook(pendingTrade.tokenId)
-
-            const hasBids = book.bids && book.bids.length > 0
+            const book = await client.getOrderBook(currentTrade.tokenId)
             const hasAsks = book.asks && book.asks.length > 0
 
-            const bestBid = hasBids ? parseFloat(book.bids[0].price) : 0
-            const bestAsk = hasAsks ? parseFloat(book.asks[0].price) : 999
-
-            let finalPrice = pendingTrade.price
-
-            if (pendingTrade.strategy === 'PASSIVE') {
-                // Passive: We just need to know if we are 'crossing' the book? 
-                // Actually passive orders just sit there. We don't strictly care about Ask unless we want to match it.
-            } else {
-                // AGGRESSIVE (Taking Liquidity):
+            // Aggressive Liquidity Check
+            if (currentTrade.strategy !== 'PASSIVE') {
                 if (!hasAsks) {
                     throw new Error("Liquidity dried up! No sellers available.")
                 }
-
-                // Check if Best Ask is still within worstCasePrice
-                if (bestAsk > pendingTrade.worstCasePrice) {
-                    // Graceful Exit - Warn user instead of throwing error
-                    toast.dismiss(toastId)
-                    toast.warn(`Price changed: ${bestAsk} > Limit ${pendingTrade.worstCasePrice.toFixed(3)}. Review and retry.`)
-                    setOrderStatus('IDLE')
-                    return
-                }
-                // Optimize: If Ask is lower/same, take it, but max at worstCase
-                finalPrice = Math.min(Math.max(bestAsk + 0.005, pendingTrade.price), pendingTrade.worstCasePrice)
             }
 
             // 3. SUBMIT ORDER
-            const payload = {
-                tokenID: pendingTrade.tokenId,
-                price: parseFloat(finalPrice.toFixed(4)),
-                side: 'BUY',
-                size: pendingTrade.shares,
+            let order;
+
+            if (currentTrade.strategy === 'PASSIVE') {
+                // PASSIVE: Limit Order at Bid (Maker)
+                const nonce = getSyncedNonce()
+                const payload = {
+                    tokenID: currentTrade.tokenId,
+                    price: parseFloat(currentTrade.price.toFixed(4)),
+                    side: 'BUY',
+                    size: currentTrade.shares,
+                    nonce: nonce,
+                    feeRateBps: 1000
+                }
+                order = await client.createAndPostOrder(payload)
+            } else {
+                // AGGRESSIVE: Fast Market Buy
+                // Use Dollar Amount to be safe against Price Mismatch/Spikes
+                order = await placeMarketOrder(
+                    client,
+                    currentTrade.tokenId,
+                    'BUY',
+                    currentTrade.estCost, // Send Dollars
+                    {
+                        slippage: 0.10,
+                        sizeInDollars: true
+                    }
+                )
             }
 
-            // 4. SUBMIT ORDER (SINGLE ATTEMPT - NO RETRIES)
-            const nonce = Date.now() + Math.floor(Math.random() * 1000)
-
-            const order = await client.createAndPostOrder({
-                ...payload,
-                nonce: nonce
-            })
-
-            // Strict Error Handling (NO RETRIES)
-
+            // 4. HANDLE RESPONSE
             if (order && (order.error || (order.status && order.status >= 400))) {
                 throw new Error(order.error || order.data?.error || "Order Submission Failed")
             }
@@ -500,10 +595,10 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                 autoClose: 2000
             })
 
-            // 4. AUTO-CANCEL SAFEGUARDS
-            const timeoutMs = pendingTrade.strategy === 'PASSIVE' ? 30000 : 2000 // 30s Passive, 2s Aggressive
+            // 5. AUTO-CANCEL SAFEGUARDS
+            const timeoutMs = currentTrade.strategy === 'PASSIVE' ? 30000 : 2000
             setTimeout(() => {
-                cancelActiveOrder(order.orderID) // Attempt auto-cancel
+                cancelActiveOrder(order.orderID)
             }, timeoutMs)
 
         } catch (err) {
@@ -527,7 +622,14 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
         if (!id || !client) return
 
         try {
-            await client.cancel(id)
+            if (typeof client.cancel === 'function') {
+                await client.cancel(id)
+            } else if (typeof client.cancelOrder === 'function') {
+                await client.cancelOrder(id) // Try alternate method name
+            } else {
+                console.warn("[FocusedMarketView] Client does not have a cancel method")
+                return
+            }
             toast.info("Active Order Cancelled")
             setOrderStatus('CANCELLED')
             setTimeout(() => setOrderStatus('IDLE'), 2000)
@@ -617,6 +719,27 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                 <Legend />
                 <Line type="stepAfter" dataKey="upPrice" stroke="#10b981" strokeWidth={3} dot={false} name="UP" animationDuration={500} />
                 <Line type="stepAfter" dataKey="downPrice" stroke="#ef4444" strokeWidth={3} dot={false} name="DOWN" animationDuration={500} />
+
+                {/* Entry Lines for User Positions */}
+                {positions.filter(p => p.conditionId === market?.conditionId).map((pos, idx) => {
+                    const isUp = pos.outcome === 'Yes' || pos.outcome === 'Up'
+                    const color = isUp ? '#10b981' : '#ef4444'
+                    return (
+                        <ReferenceLine
+                            key={`entry-${idx}`}
+                            y={pos.avgPrice}
+                            stroke={color}
+                            strokeDasharray="3 3"
+                            label={{
+                                value: `You (${pos.outcome}): ${pos.avgPrice.toFixed(2)}`,
+                                position: 'insideRight',
+                                fill: color,
+                                fontSize: 11,
+                                fontWeight: 'bold'
+                            }}
+                        />
+                    )
+                })}
             </LineChart>
         </ResponsiveContainer>
     )
@@ -678,17 +801,7 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
 
                 {/* Stats removed from here as they are in cards */}
 
-                {/* Status Message */}
-                {orderStatus && (
-                    <div style={{
-                        position: 'fixed', top: '20px', left: '50%', transform: 'translateX(-50%)',
-                        background: orderStatus.type === 'success' ? '#10b981' : '#ef4444',
-                        color: 'white', padding: '12px 24px', borderRadius: '8px', zIndex: 1000, fontWeight: '600',
-                        boxShadow: '0 10px 30px rgba(0,0,0,0.5)'
-                    }}>
-                        {orderStatus.msg}
-                    </div>
-                )}
+                {/* Status Message removed by user request */}
 
                 <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
                     {/* CHART TOGGLES (Moved here) */}
@@ -774,7 +887,7 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                             <span>Ask: <strong style={{ color: '#f59e0b' }}>{livePrices.up.ask || '-'}</strong> <span style={{ fontSize: '0.65rem', opacity: 0.7 }}>({parseFloat(livePrices.up.askSize || 0).toFixed(0)})</span></span>
                         </div>
 
-                        <div className="profit-grid">
+                        <div className="profit-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0' }}>
                             <div className="p-item">
                                 <div className="p-label">Price</div>
                                 <div className="p-val">${livePrices.up.last.toFixed(3)}</div>
@@ -783,42 +896,86 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                                 <div className="p-label">Return</div>
                                 <div className="p-val gold">x{(1 / Math.max(livePrices.up.last, 0.01)).toFixed(2)}</div>
                             </div>
+                            <div className="p-item border-left">
+                                <div className="p-label">Total</div>
+                                <div className="p-val" style={{ color: livePrices.up.last < 1 ? '#10b981' : '#ef4444' }}>
+                                    ${(tradeAmount * (1 / Math.max(livePrices.up.last, 0.01))).toFixed(2)}
+                                </div>
+                            </div>
                         </div>
 
                         {/* TRADING ACTIONS */}
                         <div style={{ marginTop: '8px', width: '100%' }}>
                             {/* Amount Selector */}
                             <div style={{ display: 'flex', gap: '4px', marginBottom: '6px' }}>
-                                {[1, 5, 10, 50].map(amt => (
+                                {[1, 2, 5].map(amt => (
                                     <button
                                         key={amt}
                                         onClick={() => setTradeAmount(amt)}
                                         style={{
                                             flex: 1,
                                             padding: '4px',
-                                            background: tradeAmount === amt ? '#10b981' : '#334155',
+                                            background: tradeAmount == amt ? '#10b981' : '#334155',
                                             color: 'white',
                                             border: 'none',
                                             borderRadius: '4px',
                                             fontSize: '0.75rem',
                                             cursor: 'pointer',
-                                            fontWeight: tradeAmount === amt ? 'bold' : 'normal'
+                                            fontWeight: tradeAmount == amt ? 'bold' : 'normal'
                                         }}
                                     >
                                         ${amt}
                                     </button>
                                 ))}
+                                <input
+                                    type="number"
+                                    value={tradeAmount}
+                                    onChange={(e) => setTradeAmount(e.target.value)}
+                                    placeholder="$"
+                                    style={{
+                                        width: '40px',
+                                        background: '#0f172a',
+                                        border: '1px solid #334155',
+                                        color: 'white',
+                                        borderRadius: '4px',
+                                        fontSize: '0.75rem',
+                                        padding: '4px',
+                                        textAlign: 'center',
+                                        outline: 'none',
+                                        colorScheme: 'dark'
+                                    }}
+                                />
+                            </div>
+
+                            {/* Auto-Buy Trigger Input */}
+                            <div style={{ display: 'flex', gap: '6px', marginBottom: '6px' }}>
+                                <input
+                                    type="number"
+                                    placeholder="Target Return (x)"
+                                    className="dark-input"
+                                    style={{ flex: 1, padding: '4px 8px', fontSize: '0.75rem', color: 'white', background: '#0f172a', border: '1px solid #334155', borderRadius: '4px' }}
+                                    value={autoBuy.up.targetReturn}
+                                    onChange={(e) => setAutoBuy(prev => ({ ...prev, up: { ...prev.up, targetReturn: e.target.value } }))}
+                                />
+                                <button
+                                    onClick={() => setAutoBuy(prev => ({ ...prev, up: { ...prev.up, active: !prev.up.active } }))}
+                                    style={{
+                                        flex: 1,
+                                        background: autoBuy.up.active ? '#f59e0b' : '#334155',
+                                        color: 'white',
+                                        border: '1px solid #f59e0b',
+                                        borderRadius: '4px',
+                                        fontSize: '0.75rem',
+                                        cursor: 'pointer',
+                                        fontWeight: 'bold'
+                                    }}
+                                >
+                                    {autoBuy.up.active ? '🛑 Stop' : '⚡ Auto'}
+                                </button>
                             </div>
 
                             {/* Strategy Buttons */}
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
-                                <button
-                                    disabled={orderStatus !== 'IDLE'}
-                                    onClick={() => initiateTrade(0, 'PASSIVE')}
-                                    style={{ background: '#334155', border: '1px solid #10b981', color: '#10b981', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem', opacity: orderStatus !== 'IDLE' ? 0.5 : 1 }}
-                                >
-                                    🛡️ Bid (Passive)
-                                </button>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '6px' }}>
                                 <button
                                     disabled={orderStatus !== 'IDLE'}
                                     onClick={() => initiateTrade(0, 'AGGRESSIVE')}
@@ -843,7 +1000,7 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                             <span>Ask: <strong style={{ color: '#f59e0b' }}>{livePrices.down.ask || '-'}</strong> <span style={{ fontSize: '0.65rem', opacity: 0.7 }}>({parseFloat(livePrices.down.askSize || 0).toFixed(0)})</span></span>
                         </div>
 
-                        <div className="profit-grid">
+                        <div className="profit-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0' }}>
                             <div className="p-item">
                                 <div className="p-label">Price</div>
                                 <div className="p-val">${livePrices.down.last.toFixed(3)}</div>
@@ -852,46 +1009,90 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                                 <div className="p-label">Return</div>
                                 <div className="p-val gold">x{(1 / Math.max(livePrices.down.last, 0.01)).toFixed(2)}</div>
                             </div>
+                            <div className="p-item border-left">
+                                <div className="p-label">Total</div>
+                                <div className="p-val" style={{ color: livePrices.down.last < 1 ? '#10b981' : '#ef4444' }}>
+                                    ${(tradeAmount * (1 / Math.max(livePrices.down.last, 0.01))).toFixed(2)}
+                                </div>
+                            </div>
                         </div>
 
                         {/* TRADING ACTIONS */}
                         <div style={{ marginTop: '8px', width: '100%' }}>
                             {/* Amount Selector */}
                             <div style={{ display: 'flex', gap: '4px', marginBottom: '6px' }}>
-                                {[1, 5, 10, 50].map(amt => (
+                                {[1, 2, 5].map(amt => (
                                     <button
                                         key={amt}
                                         onClick={() => setTradeAmount(amt)}
                                         style={{
                                             flex: 1,
                                             padding: '4px',
-                                            background: tradeAmount === amt ? '#ef4444' : '#334155',
+                                            background: tradeAmount == amt ? '#ef4444' : '#334155',
                                             color: 'white',
                                             border: 'none',
                                             borderRadius: '4px',
                                             fontSize: '0.75rem',
                                             cursor: 'pointer',
-                                            fontWeight: tradeAmount === amt ? 'bold' : 'normal'
+                                            fontWeight: tradeAmount == amt ? 'bold' : 'normal'
                                         }}
                                     >
                                         ${amt}
                                     </button>
                                 ))}
+                                <input
+                                    type="number"
+                                    value={tradeAmount}
+                                    onChange={(e) => setTradeAmount(e.target.value)}
+                                    placeholder="$"
+                                    style={{
+                                        width: '40px',
+                                        background: '#0f172a',
+                                        border: '1px solid #334155',
+                                        color: 'white',
+                                        borderRadius: '4px',
+                                        fontSize: '0.75rem',
+                                        padding: '4px',
+                                        textAlign: 'center',
+                                        outline: 'none',
+                                        colorScheme: 'dark'
+                                    }}
+                                />
+                            </div>
+
+                            {/* Auto-Buy Trigger Input */}
+                            <div style={{ display: 'flex', gap: '6px', marginBottom: '6px' }}>
+                                <input
+                                    type="number"
+                                    placeholder="Target Return (x)"
+                                    className="dark-input"
+                                    style={{ flex: 1, padding: '4px 8px', fontSize: '0.75rem', color: 'white', background: '#0f172a', border: '1px solid #334155', borderRadius: '4px' }}
+                                    value={autoBuy.down.targetReturn}
+                                    onChange={(e) => setAutoBuy(prev => ({ ...prev, down: { ...prev.down, targetReturn: e.target.value } }))}
+                                />
+                                <button
+                                    onClick={() => setAutoBuy(prev => ({ ...prev, down: { ...prev.down, active: !prev.down.active } }))}
+                                    style={{
+                                        flex: 1,
+                                        background: autoBuy.down.active ? '#f59e0b' : '#334155',
+                                        color: 'white',
+                                        border: '1px solid #f59e0b',
+                                        borderRadius: '4px',
+                                        fontSize: '0.75rem',
+                                        cursor: 'pointer',
+                                        fontWeight: 'bold'
+                                    }}
+                                >
+                                    {autoBuy.down.active ? '🛑 Stop' : '⚡ Auto'}
+                                </button>
                             </div>
 
                             {/* Strategy Buttons */}
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
-                                <button
-                                    disabled={orderStatus !== 'IDLE'}
-                                    onClick={() => initiateTrade(1, 'PASSIVE')}
-                                    style={{ background: '#334155', border: '1px solid #ef4444', color: '#ef4444', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem', opacity: orderStatus !== 'IDLE' ? 0.5 : 1 }}
-                                >
-                                    🛡️ Bid (Passive)
-                                </button>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '6px' }}>
                                 <button
                                     disabled={orderStatus !== 'IDLE'}
                                     onClick={() => initiateTrade(1, 'AGGRESSIVE')}
-                                    style={{ background: '#ef4444', border: 'none', color: 'white', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.75rem', opacity: orderStatus !== 'IDLE' ? 0.5 : 1 }}
+                                    style={{ background: '#ef4444', border: 'none', color: '#white', padding: '8px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.75rem', opacity: orderStatus !== 'IDLE' ? 0.5 : 1 }}
                                 >
                                     ⚡ Buy (Fast)
                                 </button>
@@ -902,6 +1103,118 @@ const FocusedMarketView = ({ event, client, userAddress }) => {
                 </div>
             </div>
 
+
+            {/* MY POSITIONS SECTION */}
+            {positions && positions.length > 0 && (
+                <div className="focused-positions-section" style={{ marginTop: '24px', padding: '0 1rem' }}>
+                    {(() => {
+                        const marketPositions = positions.filter(p => p.conditionId === market?.conditionId)
+                        if (marketPositions.length === 0) return null
+
+                        return (
+                            <div style={{ background: '#1e293b', borderRadius: '12px', padding: '16px', border: '1px solid #334155' }}>
+                                <h3 style={{ marginTop: 0, marginBottom: '16px', fontSize: '1.2rem' }}>My Positions</h3>
+                                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
+                                    <thead>
+                                        <tr style={{ color: '#94a3b8', borderBottom: '1px solid #334155', textAlign: 'left', textTransform: 'uppercase', fontSize: '0.75rem' }}>
+                                            <th style={{ padding: '8px' }}>Outcome</th>
+                                            <th style={{ padding: '8px' }}>Qty</th>
+                                            <th style={{ padding: '8px' }}>Avg</th>
+                                            <th style={{ padding: '8px' }}>Value</th>
+                                            <th style={{ padding: '8px' }}>Return</th>
+                                            <th style={{ padding: '8px', textAlign: 'right' }}>Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {marketPositions.map((pos, idx) => {
+                                            const isUp = pos.outcome === 'Yes' || pos.outcome === 'Up'
+
+                                            // Formatting Avg Price
+                                            const avgPriceDisplay = pos.avgPrice < 1
+                                                ? `${Math.round(pos.avgPrice * 100)}¢`
+                                                : `$${pos.avgPrice.toFixed(2)}`
+
+                                            // Value & Cost
+                                            const currentVal = pos.size * pos.curPrice
+                                            const costBasis = pos.size * pos.avgPrice
+
+                                            // PnA
+                                            const pnlValue = currentVal - costBasis
+                                            const pnlPercent = (pnlValue / costBasis) * 100
+
+                                            return (
+                                                <tr key={idx} style={{ borderBottom: '1px solid #334155' }}>
+                                                    <td style={{ padding: '12px 8px' }}>
+                                                        <span className={`outcome-badge ${pos.outcome.toLowerCase()}`} style={{ fontSize: '0.8rem', padding: '4px 8px' }}>
+                                                            {pos.outcome}
+                                                        </span>
+                                                    </td>
+                                                    <td style={{ padding: '12px 8px', color: '#e2e8f0' }}>{pos.size.toFixed(2)}</td>
+                                                    <td style={{ padding: '12px 8px', color: '#e2e8f0' }}>{avgPriceDisplay}</td>
+                                                    <td style={{ padding: '12px 8px' }}>
+                                                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                                            <span style={{ color: '#e2e8f0', fontWeight: '600' }}>
+                                                                ${currentVal.toFixed(2)}
+                                                            </span>
+                                                            <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                                                                Cost ${costBasis.toFixed(2)}
+                                                            </span>
+                                                        </div>
+                                                    </td>
+                                                    <td style={{ padding: '12px 8px' }}>
+                                                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                                            <span style={{ color: pnlValue >= 0 ? '#10b981' : '#ef4444', fontWeight: '600' }}>
+                                                                {pnlValue >= 0 ? '+' : ''}${pnlValue.toFixed(2)}
+                                                            </span>
+                                                            <span style={{ fontSize: '0.75rem', color: pnlValue >= 0 ? '#10b981' : '#ef4444' }}>
+                                                                ({pnlPercent.toFixed(2)}%)
+                                                            </span>
+                                                        </div>
+                                                    </td>
+                                                    <td style={{ padding: '12px 8px', textAlign: 'right' }}>
+                                                        <button
+                                                            className="sell-btn-compact"
+                                                            style={{
+                                                                background: '#1e293b',
+                                                                border: '1px solid #334155',
+                                                                borderRadius: '6px',
+                                                                color: '#e2e8f0',
+                                                                padding: '6px 16px',
+                                                                cursor: 'pointer',
+                                                                fontWeight: '600',
+                                                                fontSize: '0.8rem',
+                                                                transition: 'all 0.2s'
+                                                            }}
+                                                            onMouseOver={(e) => e.target.style.background = '#334155'}
+                                                            onMouseOut={(e) => e.target.style.background = '#1e293b'}
+                                                            onClick={async () => {
+                                                                if (!client) {
+                                                                    toast.error('Please login to sell')
+                                                                    return
+                                                                }
+                                                                try {
+                                                                    const order = await placeMarketOrder(client, pos.asset, 'SELL', pos.size, { sizeInDollars: false })
+                                                                    if (order.success) {
+                                                                        toast.success(`Sold ${pos.outcome}!`)
+                                                                    }
+                                                                } catch (e) {
+                                                                    toast.error('Sell failed: ' + e.message)
+                                                                }
+                                                            }}
+                                                        >
+                                                            Sell
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            )
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )
+                    })()}
+                </div>
+            )}
 
             {/* TRADING CONFIRMATION MODAL */}
             <ConfirmModal

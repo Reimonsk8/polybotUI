@@ -164,7 +164,7 @@ function App() {
               <h2 className="timeline-header">
                 <span className="timeline-icon">⏰</span>
                 Market Timeline
-                <span className="market-count">{markets.length} active markets</span>
+                <span className="market-count">{markets.filter(e => new Date(e.endDate) > new Date()).length} active markets</span>
               </h2>
             )}
 
@@ -177,6 +177,7 @@ function App() {
                       event={event}
                       client={userState.client}
                       userAddress={userState.address}
+                      positions={userState.positions}
                     />
                   ) : null
                 })()}
@@ -184,6 +185,7 @@ function App() {
             ) : (
               <div className="timeline-carousel">
                 {markets
+                  .filter(event => new Date(event.endDate) > new Date()) // Hide closed markets
                   .sort((a, b) => new Date(a.endDate) - new Date(b.endDate))
                   .map((event, index) => {
                     const market = event.markets?.[0]

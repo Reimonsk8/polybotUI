@@ -256,7 +256,8 @@ export async function placeGaslessBuyOrder(relayClient, clobClient, tokenId, siz
             price: parseFloat(bestPrice.toFixed(4)),
             side: 'BUY',
             size: orderSize,
-            nonce: Date.now() + Math.floor(Math.random() * 1000)
+            nonce: Date.now() + Math.floor(Math.random() * 1000),
+            feeRateBps: 1000 // Error explicitly demanded 1000
         }
 
         const orderResponse = await clobClient.createAndPostOrder(payload)
@@ -336,7 +337,8 @@ export async function placeGaslessSellOrder(relayClient, clobClient, tokenId, si
             price: parseFloat(bestPrice.toFixed(4)),
             side: 'SELL',
             size: size,
-            nonce: Date.now() + Math.floor(Math.random() * 1000)
+            nonce: Date.now() + Math.floor(Math.random() * 1000),
+            feeRateBps: 1000 // Error explicitly demanded 1000
         }
 
         const orderResponse = await clobClient.createAndPostOrder(payload)

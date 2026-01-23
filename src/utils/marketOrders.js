@@ -161,16 +161,33 @@ async function placeStandardMarketOrder(client, tokenId, side, size, options = {
             throw new Error(`Invalid size: ${orderSize}. Size must be greater than 0`)
         }
 
-        // 4. Clamp price to valid range (0.01 - 0.99)
+        // 4. Apply Slippage for "Market Order" behavior (Default 5%)
+        // This ensures aggressive matching even if price moves slightly
+        const slippage = options.slippage || 0.05
         let marketPrice = bestPrice
-        if (marketPrice >= 1) marketPrice = 0.99
-        if (marketPrice <= 0) marketPrice = 0.01
+
+        if (side.toUpperCase() === 'BUY') {
+            marketPrice = bestPrice * (1 + slippage)
+            // Strict API Max is 0.99
+            if (marketPrice > 0.99) {
+                marketPrice = 0.99
+            }
+        } else {
+            marketPrice = bestPrice * (1 - slippage)
+            // Strict API Min is 0.01
+            if (marketPrice < 0.01) {
+                marketPrice = 0.01
+            }
+        }
+
+        // Final safety clamp just in case
+        if (marketPrice > 0.99) marketPrice = 0.99
+        if (marketPrice < 0.01) marketPrice = 0.01
+
+        console.log(`[Market Order] Price with Slippage: ${marketPrice.toFixed(4)} (Base: ${bestPrice}, Slippage: ${slippage * 100}%)`)
 
         // 5. Generate nonce with Time Offset
-        const generateNonce = () => {
-            const now = Date.now() + timeOffset
-            return now + Math.floor(Math.random() * 1000)
-        }
+        const nonce = getSyncedNonce()
 
         // 6. Create and post order at best price (simulates market order)
         const payload = {
@@ -178,7 +195,8 @@ async function placeStandardMarketOrder(client, tokenId, side, size, options = {
             price: parseFloat(marketPrice.toFixed(4)),
             side: side.toUpperCase(),
             size: orderSize,
-            nonce: generateNonce()
+            nonce: nonce,
+            feeRateBps: 1000 // Error explicitly demanded 1000
         }
 
         // Place order - it will execute immediately since we're crossing the spread
@@ -198,6 +216,14 @@ async function placeStandardMarketOrder(client, tokenId, side, size, options = {
         console.error("[Market Order] Failed:", error)
         throw error
     }
+}
+
+/**
+ * Generate a nonce synchronized with Polymarket server time
+ */
+export function getSyncedNonce() {
+    const now = Date.now() + timeOffset
+    return now + Math.floor(Math.random() * 1000)
 }
 
 /**

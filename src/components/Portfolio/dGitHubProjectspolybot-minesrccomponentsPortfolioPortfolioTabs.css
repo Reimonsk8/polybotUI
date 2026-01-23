@@ -1,0 +1,17 @@
+
+.sell-btn-compact {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    color: #e2e8f0;
+    padding: 6px 16px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.8rem;
+    transition: all 0.2s;
+}
+
+.sell-btn-compact:hover {
+    background: #334155;
+    transform: translateY(-1px);
+}

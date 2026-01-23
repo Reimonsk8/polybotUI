@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import './PortfolioTabs.css'
 import { fetchActivityLog as fetchActivityData } from './ActivityLogFetcher'
 import { Side, OrderType } from '@polymarket/clob-client'
@@ -22,8 +22,13 @@ const PortfolioTabs = ({
     const [closedPositions, setClosedPositions] = useState([])
     const [activityLog, setActivityLog] = useState([])
     const [loading, setLoading] = useState(false)
-    const [liveUpdates, setLiveUpdates] = useState(false)
+
+    // Auto-Refresh settings (replacing WebSocket approach)
+    const [livePrices, setLivePrices] = useState({}) // { [assetId]: { price, bid, ask } }
+    const [autoRefresh, setAutoRefresh] = useState(true) // Renamed from liveUpdates
+    const [refreshInterval, setRefreshInterval] = useState(2000) // Refresh interval in milliseconds (100ms to 3000ms)
     const [wsConnected, setWsConnected] = useState(false)
+    const [lastUpdateTime, setLastUpdateTime] = useState(null) // Track last refresh time
     const [hasFetched, setHasFetched] = useState(false)
 
     // Track resolved markets to avoid repeated 404s
@@ -33,6 +38,7 @@ const PortfolioTabs = ({
     const [autoSellEnabled, setAutoSellEnabled] = useState(false)
     const [takeProfitPercent, setTakeProfitPercent] = useState(25)
     const [stopLossPercent, setStopLossPercent] = useState(50)
+    const [maxSpreadPercent, setMaxSpreadPercent] = useState(20) // Max spread to allow auto-sell
     const [triggeredOrders, setTriggeredOrders] = useState(new Set()) // Track executed sells to prevent loops
 
     // MODAL STATE
@@ -49,7 +55,7 @@ const PortfolioTabs = ({
 
             const params = new URLSearchParams({
                 user: userAddress,
-                sizeThreshold: '1', // Filter dust
+                sizeThreshold: '0.1', // Filter dust
                 limit: '100',
                 sortBy: 'TOKENS',
                 sortDirection: 'DESC'
@@ -111,13 +117,16 @@ const PortfolioTabs = ({
                 setActiveBets(standardizedPositions)
 
                 // IF Live Updates are ON, fetch Real-Time Prices from CLOB
-                if (liveUpdates) {
+                if (autoRefresh) {
                     try {
                         const updatedPositions = await Promise.all(standardizedPositions.map(async (pos) => {
                             if (!pos.asset) return pos
 
                             try {
                                 let livePrice = 0
+                                let midPrice = 0
+                                let bestBid = 0
+                                let bestAsk = 0
                                 let priceFound = false
 
                                 // OPTION A: Use Client OrderBook (Best)
@@ -125,14 +134,49 @@ const PortfolioTabs = ({
                                     try {
                                         // Skip if we already know it's resolved
                                         if (resolvedMarkets.has(pos.conditionId) || resolvedMarkets.has(pos.market)) {
-                                            // Keeping existing price or 0 if resolved
                                             return pos
                                         }
 
+                                        // FETCH ACCURATE MARKET DATA (Fixes 'Ended' Time Discrepancy)
+                                        let accurateEndDate = pos.endDate
+                                        try {
+                                            const marketDetails = await client.getMarket(pos.conditionId)
+                                            if (marketDetails) {
+                                                if (marketDetails.end_date_iso) accurateEndDate = marketDetails.end_date_iso
+                                                else if (marketDetails.endDate) accurateEndDate = marketDetails.endDate
+                                            }
+                                        } catch (e) { /* Ignore market fetch error */ }
+
                                         const book = await client.getOrderBook(pos.asset)
-                                        if (book && book.bids && book.bids.length > 0) {
-                                            livePrice = parseFloat(book.bids[0].price)
-                                            priceFound = !isNaN(livePrice)
+
+                                        // Parse Orderbook
+                                        bestBid = (book && book.bids && book.bids.length > 0) ? parseFloat(book.bids[0].price) : 0
+                                        bestAsk = (book && book.asks && book.asks.length > 0) ? parseFloat(book.asks[0].price) : 0
+
+                                        // Calculate Midpoint (Fair Value)
+                                        if (bestBid > 0 && bestAsk > 0) midPrice = (bestBid + bestAsk) / 2
+                                        else if (bestBid > 0) midPrice = bestBid
+                                        else if (bestAsk > 0) midPrice = bestAsk
+
+                                        // Calculate Display Price (Liquidation/Bid)
+                                        let displayPrice = bestBid
+                                        // Auto-Sell Logic often relies on "Fair Value" (Mid), but for "You'll Receive" UI we need Bid.
+                                        // However, standard activeBots usually show Bid price to reflect liquid exit value.
+
+                                        // If no bid, use 0 (market is illiquid)
+                                        if (!bestBid && bestAsk > 0) {
+                                            // Optional: specific handling for 'Ask only' market?
+                                            // For now, if we hold the position, and can't sell, value is 0.
+                                            displayPrice = 0
+                                        }
+
+                                        // Calculate Spread
+                                        const spread = (bestAsk > 0 && bestBid > 0) ? (bestAsk - bestBid) : 0
+                                        // const spreadPct = (displayPrice > 0) ? (spread / displayPrice) : 0 // Unused if we strip wide spread check
+
+                                        if (displayPrice > 0) {
+                                            livePrice = displayPrice
+                                            priceFound = true
                                         }
                                     } catch (err) {
                                         // Ignore 404 (No matching orderbook) - market may be resolved
@@ -146,9 +190,6 @@ const PortfolioTabs = ({
                                         if (is404 || isNoOrderbook) {
                                             // Mark as resolved so we don't try again
                                             setResolvedMarkets(prev => new Set(prev).add(pos.conditionId))
-                                        } else {
-                                            // Only log non-404 errors (network issues, etc.)
-                                            // console.warn('OrderBook Error:', err)
                                         }
                                     }
                                 }
@@ -172,7 +213,7 @@ const PortfolioTabs = ({
                                 if (priceFound) {
                                     const avg = pos.avgPrice || 0
 
-                                    // Recalculate PnL (Live)
+                                    // Recalculate PnL (Live) based on DISPLAY Price (Mid)
                                     let newPnl = 0
                                     let newPercentPnl = 0
 
@@ -183,7 +224,10 @@ const PortfolioTabs = ({
 
                                     return {
                                         ...pos,
-                                        curPrice: livePrice,
+                                        endDate: accurateEndDate || pos.endDate,
+                                        curPrice: livePrice, // Visuals use Bid (Liquidity)
+                                        midPrice: midPrice || livePrice, // Safety uses Mid
+                                        bidPrice: bestBid || livePrice,
                                         pnl: newPnl,
                                         percentPnl: newPercentPnl,
                                         isLive: true
@@ -221,7 +265,8 @@ const PortfolioTabs = ({
         if (!autoSellEnabled || !client || activeBets.length === 0) return
 
         const checkAndSell = async () => {
-            for (const bet of activeBets) {
+            // Use displayedBets to get the most up-to-date pricing for Auto-Sell
+            for (const bet of displayedBets) {
                 // Skip if already triggered or invalid
                 if (triggeredOrders.has(bet.conditionId)) continue
                 // Skip if asset ID is missing (can happen with Gamma positions that don't map to CLOB tokens)
@@ -231,19 +276,42 @@ const PortfolioTabs = ({
                 let shouldSell = false
                 let reason = ''
 
-                // Calculate PnL (API vs Local)
-                // Use Standardized 'percentPnl' which is already live-updated
-                const currentPnlPercent = bet.percentPnl * 100
+                // REALIZATION CHECK: Use BID PRICE for safety logic (not Midpoint)
+                const safePrice = bet.bidPrice || bet.curPrice
+                const avg = bet.avgPrice || 0.01
+
+                // Recalculate 'Real' PnL based on what we can actually SELL for
+                const realPnlPercent = ((safePrice - avg) / avg) * 100
+
+                // Debug Logic - Log values to help user understand triggers
+                console.log(`[AutoSell Check] ${bet.title}: Mid $${bet.curPrice.toFixed(3)} | Bid $${safePrice.toFixed(3)} | Real PnL ${realPnlPercent.toFixed(2)}%`)
+
+                // SAFETY CHECK 1: Ignore Price Glitches / Zero / Dust
+                if (safePrice <= 0.02) {
+                    console.warn(`[AutoSell] Skipping ${bet.title} - Bid too low ($${safePrice}), possible illiquidity.`)
+                    continue
+                }
+
+                // SAFETY CHECK 2: High Spread Protection
+                // If Mid is high (e.g. 0.35) but Bid is low (e.g. 0.20), don't sell!
+                const referencePrice = bet.midPrice || bet.curPrice
+                if (referencePrice > 0.05) { // Only check spread if price is significant
+                    const spread = (referencePrice - safePrice) / referencePrice
+                    if (spread > maxSpreadPercent / 100) { // Use configurable threshold
+                        console.warn(`[AutoSell] Skipping ${bet.title} - Spread too high (${(spread * 100).toFixed(1)}%). Mid: ${referencePrice}, Bid: ${safePrice}. Increase Max Spread in settings if you want to force sell.`)
+                        continue
+                    }
+                }
 
                 // Take Profit
-                if (currentPnlPercent >= takeProfitPercent) {
+                if (realPnlPercent >= takeProfitPercent) {
                     shouldSell = true
-                    reason = `Take Profit: +${currentPnlPercent.toFixed(1)}%`
+                    reason = `Take Profit: +${realPnlPercent.toFixed(1)}%`
                 }
                 // Stop Loss
-                else if (currentPnlPercent <= -stopLossPercent) {
+                else if (realPnlPercent <= -stopLossPercent) {
                     shouldSell = true
-                    reason = `Stop Loss: ${currentPnlPercent.toFixed(1)}%`
+                    reason = `Stop Loss: ${realPnlPercent.toFixed(1)}%`
                 }
 
                 if (shouldSell) {
@@ -314,7 +382,8 @@ const PortfolioTabs = ({
                                 price: parseFloat(sellPrice.toFixed(4)),
                                 side: Side.SELL,
                                 size: bet.size,
-                                nonce: generateNonce()
+                                nonce: generateNonce(),
+                                feeRateBps: 1000 // Updated
                             })
 
                             console.log('[Auto Sell] Limit order placed:', order)
@@ -424,7 +493,7 @@ const PortfolioTabs = ({
 
     // WebSocket for Live Updates
     useEffect(() => {
-        if (!liveUpdates || !apiCreds) {
+        if (true || !apiCreds) { // WebSocket Disabled in favor of polling
             setWsConnected(false)
             return
         }
@@ -493,42 +562,107 @@ const PortfolioTabs = ({
         }
 
         return () => {
-            ws.close()
+            // Only close if not already CLOSED or CLOSING
+            if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+                // Remove listeners to prevent async errors
+                ws.onclose = null
+                ws.onerror = null
+                ws.close()
+            }
             clearInterval(pingInterval)
         }
-    }, [liveUpdates, apiCreds, userAddress]) // Re-connect if toggle or creds change
+    }, [apiCreds, userAddress]) // Re-connect if creds change
 
-
-
-    // POLL For Prices when Live Updates are ON
-    // The WebSocket only tells us about OUR trades (fills/cancels).
-    // It DOES NOT tell us if the market price changed.
-    // To show "Real Time Value" we must poll valid positions frequently.
+    // AUTO-REFRESH Positions at configurable interval
     useEffect(() => {
-        if (!liveUpdates || !userAddress) return
+        if (!autoRefresh || !userAddress) return
 
-        // Fetch frequently (every 2s) to keep Current Price and P&L fresh
+        // Fetch positions at user-defined interval
         const priceInterval = setInterval(() => {
             if (activeTab === 'active') {
                 fetchActiveBets()
+                setLastUpdateTime(Date.now()) // Track refresh time for UI display
             }
-        }, 2000)
+        }, refreshInterval) // refreshInterval is already in milliseconds
 
         return () => clearInterval(priceInterval)
-    }, [liveUpdates, activeTab, userAddress])
+    }, [autoRefresh, refreshInterval, activeTab, userAddress])
 
     // Standard Auto-Sell polling (safety fallback)
     useEffect(() => {
-        // If Live Updates IS ON, the interval above handles it (2s).
-        // If Live Updates IS OFF, but Auto-Sell IS ON, we use this slower poll (10s).
-        if (!autoSellEnabled || liveUpdates) return
+        // If Auto-Refresh IS ON, the interval above handles it.
+        // If Auto-Refresh IS OFF, but Auto-Sell IS ON, we use this slower poll (10s).
+        if (!autoSellEnabled || autoRefresh) return
 
         const interval = setInterval(() => {
             if (activeTab === 'active') fetchActiveBets()
         }, 10000)
 
         return () => clearInterval(interval)
-    }, [autoSellEnabled, liveUpdates, activeTab, userAddress])
+    }, [autoSellEnabled, autoRefresh, activeTab, userAddress])
+
+    // MARKET WebSocket DISABLED (User preference: use simple API polling instead)
+    // WebSocket was showing artificial "fast" latency but actual price updates come from API polling
+    // Keeping this commented in case WebSocket approach is needed in future
+    /*
+    useEffect(() => {
+        if (!autoRefresh || activeBets.length === 0) return
+
+        const assetIds = [...new Set(activeBets.map(b => b.asset).filter(Boolean))]
+        if (assetIds.length === 0) return
+
+        const ws = new WebSocket('wss://ws-subscriptions-clob.polymarket.com/ws/market')
+        // ... WebSocket logic ...
+        
+        return () => {
+            if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+                ws.close()
+            }
+        }
+    }, [autoRefresh, activeBets.length])
+    */
+
+    // MERGE Active Bets with Live Prices for Display
+    const displayedBets = useMemo(() => {
+        return activeBets.map(bet => {
+            const liveData = livePrices[bet.asset]
+            if (!liveData) return bet
+
+            // Determine best price to show
+            // 1. Last Trade Price (from WS)
+            // 2. Midpoint (from WS Bid/Ask)
+            // 3. Existing curPrice
+
+            let newPrice = bet.curPrice
+            let newBid = bet.bidPrice
+
+            if (liveData.price) {
+                newPrice = liveData.price
+            } else if (liveData.bid && liveData.ask) {
+                newPrice = (liveData.bid + liveData.ask) / 2
+            } else if (liveData.bid) {
+                newPrice = liveData.bid
+            }
+
+            if (liveData.bid) newBid = liveData.bid
+
+            // Recalculate PnL
+            const size = bet.size || 0
+            const avg = bet.avgPrice || 0
+            const newPnl = (newPrice - avg) * size
+            const newPercentPnl = avg > 0 ? (newPrice - avg) / avg : 0
+
+            return {
+                ...bet,
+                curPrice: newPrice, // Mark Price (Last Trade or Mid)
+                bidPrice: newBid || newPrice, // Fallback to newPrice if no bid yet, but prefer Bid
+                pnl: newPnl,
+                percentPnl: newPercentPnl,
+                isLive: !!liveData
+            }
+        })
+    }, [activeBets, livePrices])
+
 
     // SELL LOGIC - TRIGGER (Opens Modal)
     const handleSellClick = (bet) => {
@@ -961,34 +1095,40 @@ const PortfolioTabs = ({
                                 <span style={{ fontSize: '1.2rem' }}>🤖</span>
                                 <h3 style={{ margin: 0, fontSize: '1rem', color: '#e2e8f0' }}>Auto-Sell Bot</h3>
                             </div>
-                            <label className="switch" style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
-                                <span style={{ fontSize: '0.9rem', color: autoSellEnabled ? '#10b981' : '#94a3b8' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                <span style={{
+                                    fontSize: '0.9rem',
+                                    fontWeight: '600',
+                                    color: autoSellEnabled ? '#34d399' : '#94a3b8',
+                                    transition: 'color 0.3s'
+                                }}>
                                     {autoSellEnabled ? 'ENABLED' : 'DISABLED'}
                                 </span>
-                                <input
-                                    type="checkbox"
-                                    checked={autoSellEnabled}
-                                    onChange={(e) => {
-                                        if (!client && e.target.checked) {
-                                            toast.error("Login (L2) required for Auto-Sell")
-                                            return
-                                        }
-                                        setAutoSellEnabled(e.target.checked)
-                                        // Force Live Updates ON if Auto-Sell is enabled for better data
-                                        if (e.target.checked && !liveUpdates) setLiveUpdates(true)
-                                    }}
-                                    style={{ accentColor: '#10b981' }}
-                                />
-                            </label>
+                                <div style={{ position: 'relative', width: '60px', height: '34px' }}>
+                                    <input
+                                        type="checkbox"
+                                        id="auto-sell-toggle"
+                                        className="toggle-switch-input"
+                                        checked={autoSellEnabled}
+                                        onChange={(e) => {
+                                            if (!client && e.target.checked) {
+                                                toast.error("Login (L2) required for Auto-Sell")
+                                                return
+                                            }
+                                            setAutoSellEnabled(e.target.checked)
+                                            if (e.target.checked && !liveUpdates) setLiveUpdates(true)
+                                        }}
+                                    />
+                                    <label htmlFor="auto-sell-toggle" className="toggle-switch-label"></label>
+                                </div>
+                            </div>
                         </div>
 
                         {/* Controls */}
                         <div className="auto-sell-controls" style={{
                             display: 'grid',
-                            gridTemplateColumns: '1fr 1fr',
+                            gridTemplateColumns: '1fr 1fr 1fr',
                             gap: '24px',
-                            opacity: autoSellEnabled ? 1 : 0.5,
-                            pointerEvents: autoSellEnabled ? 'auto' : 'none',
                             transition: 'opacity 0.2s'
                         }}>
                             {/* Take Profit */}
@@ -1026,6 +1166,24 @@ const PortfolioTabs = ({
                                     Sell if loss {'>'} {stopLossPercent}%
                                 </div>
                             </div>
+
+                            {/* Max Spread Tolerance */}
+                            <div className="control-group">
+                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                    <span style={{ fontSize: '0.9rem', fontWeight: '600', color: '#f59e0b' }}>Max Spread</span>
+                                    <span style={{ color: '#f59e0b', fontWeight: '700' }}>{maxSpreadPercent}%</span>
+                                </div>
+                                <input
+                                    type="range"
+                                    min="5" max="80" step="5"
+                                    value={maxSpreadPercent}
+                                    onChange={(e) => setMaxSpreadPercent(Number(e.target.value))}
+                                    style={{ width: '100%', accentColor: '#f59e0b' }}
+                                />
+                                <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '4px' }}>
+                                    Skip if spread {'>'} {maxSpreadPercent}%
+                                </div>
+                            </div>
                         </div>
                     </div>
                 )}
@@ -1040,114 +1198,209 @@ const PortfolioTabs = ({
                                 {activeBets.length === 0 ? (
                                     <div className="empty-state">No active positions found.</div>
                                 ) : (
-                                    <div className="positions-grid">
-                                        {activeBets.map((bet, idx) => (
-                                            <div key={idx} className="position-card">
-                                                <div className="position-header">
-                                                    <div className="market-title-with-icon">
-                                                        {bet.icon && (
-                                                            <img
-                                                                src={bet.icon}
-                                                                alt=""
-                                                                className="market-icon"
-                                                                onError={(e) => e.target.style.display = 'none'}
-                                                            />
-                                                        )}
-                                                        <h4>{bet.title}</h4>
-                                                    </div>
-                                                    <span className={`outcome-badge ${bet.outcome.toLowerCase()}`}>
-                                                        {bet.outcome}
-                                                    </span>
-                                                </div>
+                                    <div className="positions-table-container" style={{ overflowX: 'auto', background: 'rgba(30, 41, 59, 0.4)', borderRadius: '12px', border: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.9rem' }}>
+                                            <thead>
+                                                <tr style={{ color: '#94a3b8', borderBottom: '1px solid #334155', textAlign: 'left', textTransform: 'uppercase', fontSize: '0.75rem' }}>
+                                                    <th style={{ padding: '16px', width: '35%' }}>Market</th>
+                                                    <th style={{ padding: '16px' }}>Qty</th>
+                                                    <th style={{ padding: '16px' }}>Avg &rarr; Now</th>
+                                                    <th style={{ padding: '16px' }}>Value</th>
+                                                    <th style={{ padding: '16px' }}>Return</th>
+                                                    <th style={{ padding: '16px', textAlign: 'right' }}>Action</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {displayedBets.map((bet, idx) => {
+                                                    // Formatting
+                                                    // Formatting helper for precision
+                                                    const formatPrice = (p) => p < 1 ? `${(p * 100).toFixed(1)}¢` : `$${p.toFixed(2)}`
+                                                    const avgPriceDisplay = formatPrice(bet.avgPrice)
+                                                    const curPriceDisplay = formatPrice(bet.curPrice)
 
-                                                {bet.description && (
-                                                    <p className="market-description">{bet.description}</p>
-                                                )}
+                                                    const currentVal = bet.size * bet.curPrice
+                                                    const costBasis = bet.size * bet.avgPrice
+                                                    const pnlValue = currentVal - costBasis
+                                                    const pnlPercent = costBasis > 0 ? (pnlValue / costBasis) * 100 : 0
+                                                    const isResolved = resolvedMarkets.has(bet.conditionId)
 
-                                                <div className="position-summary-text" style={{ fontSize: '0.85rem', color: '#94a3b8', marginBottom: '12px' }}>
-                                                    ${(bet.size * bet.avgPrice).toFixed(2)} on <span className={`outcome-text-inline ${bet.outcome.toLowerCase()}`} style={{ fontWeight: '600', color: bet.outcome === 'Yes' || bet.outcome === 'Up' ? '#10b981' : '#ef4444' }}>{bet.outcome}</span> to win <span style={{ color: '#e2e8f0', fontWeight: '500' }}>${bet.size.toFixed(2)}</span>
-                                                </div>
+                                                    return (
+                                                        <tr key={idx} style={{ borderBottom: '1px solid #334155' }}>
+                                                            {/* Market & Outcome */}
+                                                            <td style={{ padding: '16px' }}>
+                                                                <div style={{ display: 'flex', gap: '12px' }}>
+                                                                    {bet.icon && (
+                                                                        <img
+                                                                            src={bet.icon}
+                                                                            alt=""
+                                                                            style={{ width: '32px', height: '32px', borderRadius: '6px', marginTop: '2px' }}
+                                                                            onError={(e) => e.target.style.display = 'none'}
+                                                                        />
+                                                                    )}
+                                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                                                        <span style={{ color: '#e2e8f0', fontWeight: '600', fontSize: '0.9rem', lineHeight: '1.3' }}>
+                                                                            {bet.title}
+                                                                        </span>
+                                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                                            <span className={`outcome-badge ${bet.outcome.toLowerCase()}`} style={{ fontSize: '0.75rem', padding: '2px 8px' }}>
+                                                                                {bet.outcome}
+                                                                            </span>
+                                                                            {/* Live Indicator */}
+                                                                            {bet.isLive && (
+                                                                                <span style={{ fontSize: '0.7rem', color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px', background: 'rgba(16, 185, 129, 0.1)', padding: '1px 6px', borderRadius: '4px' }}>
+                                                                                    <span style={{ width: '6px', height: '6px', background: '#10b981', borderRadius: '50%' }}></span>
+                                                                                    LIVE
+                                                                                </span>
+                                                                            )}
+                                                                            {/* Time Remaining */}
+                                                                            {(bet.endDate || bet.market?.endDate) && (
+                                                                                <span style={{ fontSize: '0.7rem', color: '#f59e0b', background: 'rgba(245, 158, 11, 0.1)', padding: '1px 6px', borderRadius: '4px', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                                                                                    ⏳ {(() => {
+                                                                                        const end = bet.endDate || bet.market?.endDate;
 
-                                                <div className="position-stats">
-                                                    <div className="stat">
-                                                        <span className="stat-label">Size</span>
-                                                        <span className="stat-value">{bet.size.toFixed(2)}</span>
-                                                    </div>
-                                                    <div className="stat">
-                                                        <span className="stat-label">Entry</span>
-                                                        <span className="stat-value">{formatCurrency(bet.avgPrice)}</span>
-                                                    </div>
-                                                    <div className="stat">
-                                                        <span className="stat-label">Price {bet.isLive && '⚡'}</span>
-                                                        <span className="stat-value" style={{ color: bet.isLive ? '#10b981' : '#f59e0b' }}>{formatCurrency(bet.curPrice)}</span>
-                                                    </div>
-                                                    <div className="stat">
-                                                        <span className="stat-label">Value</span>
-                                                        <span className="stat-value" style={{ fontWeight: '700', color: '#e2e8f0' }}>{formatCurrency(bet.size * bet.curPrice)}</span>
-                                                    </div>
-                                                    <div className="stat">
-                                                        <span className="stat-label">P&L</span>
-                                                        <span className={`stat-value ${bet.percentPnl >= 0 ? 'positive' : 'negative'}`}>
-                                                            {formatCurrency((bet.curPrice - bet.avgPrice) * bet.size)} ({bet.percentPnl >= 0 ? '+' : ''}{(bet.percentPnl * 100).toFixed(1)}%)
-                                                        </span>
-                                                    </div>
-                                                </div>
+                                                                                        // Parse end date properly accounting for ET timezone
+                                                                                        // Polymarket times are in ET (UTC-5 in winter, UTC-4 in summer)
+                                                                                        let endTime;
+                                                                                        try {
+                                                                                            endTime = new Date(end);
 
-                                                {/* SELL / CLAIM BUTTON */}
-                                                {/* SELL / CLAIM BUTTON */}
-                                                <div className="position-actions" style={{ marginTop: '12px', borderTop: '1px solid #334155', paddingTop: '12px' }}>
-                                                    {resolvedMarkets.has(bet.conditionId) ? (
-                                                        <button
-                                                            className="sell-btn"
-                                                            style={{
-                                                                width: '100%',
-                                                                padding: '10px',
-                                                                borderRadius: '6px',
-                                                                background: '#3b82f6',
-                                                                color: 'white',
-                                                                border: 'none',
-                                                                fontWeight: '600',
-                                                                cursor: 'pointer',
-                                                                display: 'flex',
-                                                                justifyContent: 'center',
-                                                                alignItems: 'center',
-                                                                gap: '8px',
-                                                                boxShadow: '0 4px 6px -1px rgba(59, 130, 246, 0.5)'
-                                                            }}
-                                                            onClick={() => handleSellClick(bet)}
-                                                        >
-                                                            <span>🎁 Claim Winnings</span>
-                                                        </button>
-                                                    ) : (
-                                                        <button
-                                                            className="sell-btn"
-                                                            onClick={() => handleSellClick(bet)}
-                                                            disabled={!client}
-                                                            style={{
-                                                                width: '100%',
-                                                                padding: '10px',
-                                                                borderRadius: '6px',
-                                                                background: '#ef4444',
-                                                                color: 'white',
-                                                                border: 'none',
-                                                                fontWeight: '600',
-                                                                cursor: client ? 'pointer' : 'not-allowed',
-                                                                opacity: client ? 1 : 0.6,
-                                                                display: 'flex',
-                                                                justifyContent: 'center',
-                                                                alignItems: 'center',
-                                                                gap: '8px'
-                                                            }}
-                                                        >
-                                                            <span>💸 Sell All</span>
-                                                            <span style={{ fontWeight: '400', fontSize: '0.9em', opacity: 0.9 }}>
-                                                                (Est. {formatCurrency(bet.size * bet.curPrice)})
-                                                            </span>
-                                                        </button>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        ))}
+                                                                                            // If the date string doesn't have timezone info (no 'Z' or offset),
+                                                                                            // it's likely in ET format but parsed as local time
+                                                                                            // We need to add the offset difference between local and ET
+                                                                                            if (!end.includes('Z') && !end.includes('+') && !end.includes('-', 10)) {
+                                                                                                // Get local timezone offset in minutes
+                                                                                                const localOffset = new Date().getTimezoneOffset();
+                                                                                                // ET is UTC-5 (EST) or UTC-4 (EDT)
+                                                                                                // Assuming EST (UTC-5) = +300 minutes offset from UTC
+                                                                                                const etOffset = 300; // Eastern Standard Time offset in minutes
+
+                                                                                                // Adjust: add difference between what JavaScript assumed (local) and what it should be (ET)
+                                                                                                const offsetDiff = localOffset - etOffset;
+                                                                                                endTime = new Date(endTime.getTime() + offsetDiff * 60 * 1000);
+                                                                                            }
+                                                                                        } catch (e) {
+                                                                                            return 'Invalid';
+                                                                                        }
+
+                                                                                        const diff = endTime - new Date();
+                                                                                        if (diff <= 0) return 'Ended';
+                                                                                        const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+                                                                                        const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+                                                                                        if (days > 0) return `${days}d ${hours}h`;
+                                                                                        const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+                                                                                        return `${hours}h ${mins}m`;
+                                                                                    })()}
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+                                                            </td>
+
+                                                            {/* Qty */}
+                                                            <td style={{ padding: '16px', color: '#e2e8f0', fontSize: '0.95rem' }}>
+                                                                {bet.size.toFixed(2)}
+                                                            </td>
+
+                                                            {/* Avg -> Now */}
+                                                            <td style={{ padding: '16px', color: '#94a3b8' }}>
+                                                                <span style={{ color: '#e2e8f0' }}>{avgPriceDisplay}</span>
+                                                                <span style={{ margin: '0 6px', color: '#64748b' }}>&rarr;</span>
+                                                                <span style={{ color: bet.curPrice >= bet.avgPrice ? '#10b981' : '#f43f5e' }}>
+                                                                    {curPriceDisplay}
+                                                                </span>
+                                                            </td>
+
+                                                            {/* Value with Cost Basis */}
+                                                            <td style={{ padding: '16px' }}>
+                                                                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                                                    <span style={{ color: '#e2e8f0', fontWeight: '600', fontSize: '0.95rem' }}>
+                                                                        ${currentVal.toFixed(2)}
+                                                                    </span>
+                                                                    <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                                                                        Cost ${costBasis.toFixed(2)}
+                                                                    </span>
+                                                                    <span style={{ fontSize: '0.75rem', color: '#10b981', marginTop: '2px' }}>
+                                                                        Max ${bet.size.toFixed(2)}
+                                                                    </span>
+                                                                </div>
+                                                            </td>
+
+                                                            {/* Return */}
+                                                            <td style={{ padding: '16px' }}>
+                                                                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                                                    <span style={{ color: pnlValue >= 0 ? '#10b981' : '#ef4444', fontWeight: '600', fontSize: '0.95rem' }}>
+                                                                        {pnlValue >= 0 ? '+' : ''}${pnlValue.toFixed(2)}
+                                                                    </span>
+                                                                    <span style={{ fontSize: '0.75rem', color: pnlValue >= 0 ? '#10b981' : '#ef4444' }}>
+                                                                        ({pnlPercent.toFixed(2)}%)
+                                                                    </span>
+                                                                </div>
+                                                            </td>
+
+                                                            {/* Action - Sell / Claim */}
+                                                            <td style={{ padding: '16px', textAlign: 'right' }}>
+                                                                {isResolved ? (
+                                                                    <button
+                                                                        className="sell-btn"
+                                                                        onClick={() => handleSellClick(bet)}
+                                                                        style={{
+                                                                            background: '#3b82f6',
+                                                                            color: 'white',
+                                                                            border: 'none',
+                                                                            borderRadius: '6px',
+                                                                            padding: '6px 16px',
+                                                                            fontWeight: '600',
+                                                                            cursor: 'pointer',
+                                                                            boxShadow: '0 4px 6px rgba(59, 130, 246, 0.3)'
+                                                                        }}
+                                                                    >
+                                                                        Claim
+                                                                    </button>
+                                                                ) : (
+                                                                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
+                                                                        {/* Receive Info Stack */}
+                                                                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', lineHeight: '1.1' }}>
+                                                                            <span style={{ fontSize: '0.75rem', color: '#94a3b8', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                                                You'll receive 💸
+                                                                            </span>
+                                                                            <span style={{ fontSize: '1.1rem', fontWeight: '700', color: pnlValue >= 0 ? '#10b981' : '#e2e8f0' }}>
+                                                                                ${(bet.size * (bet.bidPrice || bet.curPrice)).toFixed(2)}
+                                                                            </span>
+                                                                        </div>
+
+                                                                        {/* Big Colored Button */}
+                                                                        <button
+                                                                            className="sell-btn-large"
+                                                                            onClick={() => handleSellClick(bet)}
+                                                                            disabled={!client}
+                                                                            style={{
+                                                                                background: pnlValue >= 0 ? '#16a34a' : '#ef4444',
+                                                                                border: 'none',
+                                                                                borderRadius: '8px',
+                                                                                color: 'white',
+                                                                                padding: '8px 24px',
+                                                                                cursor: client ? 'pointer' : 'not-allowed',
+                                                                                fontWeight: '700',
+                                                                                fontSize: '0.9rem',
+                                                                                boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+                                                                                transition: 'transform 0.1s',
+                                                                                opacity: client ? 1 : 0.7,
+                                                                                minWidth: '100px'
+                                                                            }}
+                                                                            onMouseOver={(e) => { if (client) e.currentTarget.style.transform = 'scale(1.02)' }}
+                                                                            onMouseOut={(e) => { if (client) e.currentTarget.style.transform = 'scale(1)' }}
+                                                                        >
+                                                                            Sell {bet.outcome}
+                                                                        </button>
+                                                                    </div>
+                                                                )}
+                                                            </td>
+                                                        </tr>
+                                                    )
+                                                })}
+                                            </tbody>
+                                        </table>
                                     </div>
                                 )}
                             </div>
@@ -1243,43 +1496,159 @@ const PortfolioTabs = ({
                 )}
 
                 {/* Auto-refresh Toggle - Footer */}
-                <div className="auto-refresh-toggle">
-                    <label style={{ opacity: apiCreds ? 1 : 0.5, cursor: apiCreds ? 'pointer' : 'not-allowed' }}>
-                        <input
-                            type="checkbox"
-                            checked={liveUpdates}
-                            onChange={(e) => {
-                                if (!apiCreds) {
-                                    alert("L2 Authentication required for Live Updates. Please login with API Keys or Private Key.")
-                                    return
-                                }
-                                setLiveUpdates(e.target.checked)
-                            }}
-                            disabled={!apiCreds}
-                        />
-                        <span className="refresh-icon" style={{ color: liveUpdates ? (wsConnected ? '#10b981' : '#f59e0b') : 'inherit' }}>
-                            {liveUpdates ? '⚡' : '⚪'}
-                        </span>
-                        {liveUpdates ? 'Live' : 'Enable Live Updates (WebSocket/Poll)'}
-                    </label>
+                <div className="auto-refresh-toggle" style={{ borderTop: '1px solid rgba(255,255,255,0.1)', marginTop: '20px', paddingTop: '20px' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', alignItems: 'center', opacity: apiCreds ? 1 : 0.5, transition: 'opacity 0.3s' }}>
+
+                        {/* Control Row: Toggle + Interval Slider */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '24px', width: '100%', justifyContent: 'center' }}>
+                            {/* Auto-Refresh Toggle */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                <span style={{ fontSize: '1.2rem' }}>
+                                    {autoRefresh ? '🔄' : '⏸'}
+                                </span>
+                                <span style={{
+                                    fontSize: '0.9rem',
+                                    fontWeight: '600',
+                                    color: autoRefresh ? '#10b981' : '#94a3b8',
+                                    transition: 'color 0.3s'
+                                }}>
+                                    {autoRefresh ? 'AUTO-REFRESH ON' : 'AUTO-REFRESH OFF'}
+                                </span>
+
+                                <div style={{ position: 'relative', width: '60px', height: '34px' }}>
+                                    <input
+                                        type="checkbox"
+                                        id="auto-refresh-toggle"
+                                        className="toggle-switch-input"
+                                        checked={autoRefresh}
+                                        onChange={(e) => {
+                                            if (!apiCreds) {
+                                                alert("L2 Authentication required for Auto-Refresh. Please login with API Keys or Private Key.")
+                                                return
+                                            }
+                                            setAutoRefresh(e.target.checked)
+                                        }}
+                                        disabled={!apiCreds}
+                                    />
+                                    <label htmlFor="auto-refresh-toggle" className="toggle-switch-label"></label>
+                                </div>
+                            </div>
+
+                            {/* Refresh Interval Slider */}
+                            {autoRefresh && (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: '250px' }}>
+                                    <span style={{ fontSize: '0.8rem', color: '#94a3b8', whiteSpace: 'nowrap' }}>
+                                        Refresh every:
+                                    </span>
+                                    <input
+                                        type="range"
+                                        min="100"
+                                        max="3000"
+                                        step="100"
+                                        value={refreshInterval}
+                                        onChange={(e) => setRefreshInterval(Number(e.target.value))}
+                                        style={{ flex: 1, accentColor: '#10b981' }}
+                                    />
+                                    <span style={{ fontSize: '0.9rem', fontWeight: '700', color: '#10b981', minWidth: '45px' }}>
+                                        {(refreshInterval / 1000).toFixed(1)}s
+                                    </span>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Status Display */}
+                        {autoRefresh && (
+                            <div style={{ fontSize: '0.75rem', color: '#64748b', textAlign: 'center' }}>
+                                🔄 Refreshing positions every <span style={{ color: '#10b981', fontWeight: '600' }}>{(refreshInterval / 1000).toFixed(1)} second{refreshInterval !== 1000 ? 's' : ''}</span>
+                                {lastUpdateTime && (
+                                    <span style={{ marginLeft: '12px', color: '#94a3b8' }}>
+                                        • Last: {(() => {
+                                            const sec = Math.floor((Date.now() - lastUpdateTime) / 1000);
+                                            return sec === 0 ? 'just now' : `${sec}s ago`;
+                                        })()}
+                                    </span>
+                                )}
+                            </div>
+                        )}
+                    </div>
                 </div>
             </div>
-
-            {/* SELL CONFIRMATION MODAL */}
             <ConfirmModal
                 isOpen={sellModalOpen}
-                title="Confirm Sell Order"
-                message={betToSell ? `Are you sure you want to SELL ALL ${betToSell.size.toFixed(2)} shares of:\n\n${betToSell.title} (${betToSell.outcome})?\n\nEstimated Payout: $${(betToSell.size * betToSell.curPrice).toFixed(2)}` : ''}
+                title={betToSell ? `Sell ${betToSell.title}` : 'Confirm Sell'}
                 onConfirm={confirmSellPosition}
                 onCancel={() => {
                     setSellModalOpen(false)
                     setBetToSell(null)
                 }}
-                confirmText="💸 Sell Position"
-                cancelText="Keep"
-                isDestructive={true}
-            />
-        </div >
+                confirmText={betToSell ? `Sell ${betToSell.outcome}` : 'Sell'}
+                cancelText="Cancel"
+                isDestructive={false}
+                confirmButtonStyle={{
+                    background: '#0ea5e9',
+                    width: '100%',
+                    padding: '12px',
+                    fontSize: '1rem',
+                    borderRadius: '8px',
+                    boxShadow: '0 4px 6px -1px rgba(14, 165, 233, 0.4)'
+                }}
+            >
+                {betToSell && (
+                    <div className="sell-confirm-content" style={{ padding: '0 0.5rem' }}>
+                        <div style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'flex-start',
+                            marginBottom: '24px'
+                        }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                <span style={{
+                                    fontSize: '1.1rem',
+                                    fontWeight: '700',
+                                    color: '#e2e8f0',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '6px'
+                                }}>
+                                    You'll receive 💸
+                                </span>
+                                <span style={{ fontSize: '0.85rem', color: '#64748b', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                    Avg. Price {betToSell.avgPrice < 1
+                                        ? `${(betToSell.avgPrice * 100).toFixed(1)}¢`
+                                        : `$${betToSell.avgPrice.toFixed(2)}`}
+                                    <span style={{ fontSize: '0.7em', border: '1px solid #64748b', borderRadius: '50%', width: '12px', height: '12px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>i</span>
+                                </span>
+                                <span style={{ fontSize: '0.85rem', color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                    Potential Win: ${betToSell.size.toFixed(2)}
+                                </span>
+                            </div>
+
+                            <div style={{
+                                fontSize: '2.5rem',
+                                fontWeight: '700',
+                                color: '#22c55e',
+                                lineHeight: '1',
+                                letterSpacing: '-0.5px'
+                            }}>
+                                {formatCurrency(betToSell.size * betToSell.curPrice)}
+                            </div>
+                        </div>
+
+                        <div style={{
+                            background: 'rgba(15, 23, 42, 0.5)',
+                            padding: '12px',
+                            borderRadius: '8px',
+                            marginBottom: '8px',
+                            fontSize: '0.9rem',
+                            color: '#94a3b8',
+                            border: '1px solid rgba(51, 65, 85, 0.5)'
+                        }}>
+                            Selling <strong>{betToSell.size.toFixed(2)}</strong> shares of <strong style={{ color: '#e2e8f0' }}>{betToSell.outcome}</strong> at ~{formatCurrency(betToSell.curPrice)}
+                        </div>
+                    </div>
+                )}
+            </ConfirmModal>
+        </div>
     )
 }
 

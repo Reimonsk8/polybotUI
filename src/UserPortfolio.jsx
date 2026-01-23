@@ -180,26 +180,42 @@ const UserPortfolio = ({ onStateChange }) => {
     // Propagate State to Parent (App.jsx) for Trading Views
     useEffect(() => {
         if (onStateChange) {
-            // Get API credentials from environment (used for both L2 auth and gasless trading)
-            const builderCreds = {
-                key: import.meta.env.VITE_API_KEY,
-                secret: import.meta.env.VITE_API_SECRET,
-                passphrase: import.meta.env.VITE_API_PASSPHRASE
-            }
+            // Get API credentials from State (Derived) OR Environment (Fallback)
+            // Prioritize STATE credentials because they are what the current session actually uses.
+            // .env creds might be stale or missing if user logged in via Private Key only.
 
-            // Only include builder creds if all fields are present
-            const hasBuilderCreds = builderCreds.key && builderCreds.secret && builderCreds.passphrase
+            let activeCreds = null
+
+            if (apiCreds && apiCreds.apiKey && apiCreds.secret && apiCreds.passphrase) {
+                // Use the credentials derived during login
+                activeCreds = {
+                    key: apiCreds.apiKey,
+                    secret: apiCreds.secret,
+                    passphrase: apiCreds.passphrase
+                }
+            } else {
+                // Fallback to .env
+                const envCreds = {
+                    key: import.meta.env.VITE_API_KEY,
+                    secret: import.meta.env.VITE_API_SECRET,
+                    passphrase: import.meta.env.VITE_API_PASSPHRASE
+                }
+                if (envCreds.key && envCreds.secret && envCreds.passphrase) {
+                    activeCreds = envCreds
+                }
+            }
 
             onStateChange({
                 client,
                 address: proxyAddress || address, // Use proxy if available (L2), else L1
                 isConnected: !!address,
                 privateKey: savedPrivateKey, // For gasless trading
-                builderCreds: hasBuilderCreds ? builderCreds : null, // For gasless trading (same as API creds)
-                gaslessEnabled: hasBuilderCreds && !!savedPrivateKey
+                builderCreds: activeCreds, // Pass the active credentials for gasless/relayer
+                gaslessEnabled: !!activeCreds && !!savedPrivateKey,
+                positions: positions // Pass positions to App.jsx for FocusedView
             })
         }
-    }, [client, address, proxyAddress, savedPrivateKey, onStateChange])
+    }, [client, address, proxyAddress, savedPrivateKey, apiCreds, onStateChange])
 
     const fetchPortfolioValue = async (userAddress) => {
         try {
@@ -291,16 +307,21 @@ const UserPortfolio = ({ onStateChange }) => {
             const l1Client = new ClobClient("https://clob.polymarket.com", 137, signer)
 
             // 3. Try to derive API Keys first (nonce 0), then create if needed
-            let creds
-            try {
-                creds = await l1Client.deriveApiKey()
-                setApiCreds(creds)
-            } catch (deriveErr) {
+            let creds = apiCreds // Use existing if available (e.g. from session)
+
+            if (!creds) {
                 try {
-                    creds = await l1Client.createApiKey()
+                    creds = await l1Client.deriveApiKey()
                     setApiCreds(creds)
-                } catch (createErr) {
-                    throw new Error("Could not obtain API credentials. " + createErr.message)
+                    console.log('[L2 Login] Derived API credentials successfully')
+                } catch (deriveErr) {
+                    try {
+                        creds = await l1Client.createApiKey()
+                        setApiCreds(creds)
+                        console.log('[L2 Login] Created new API credentials')
+                    } catch (createErr) {
+                        throw new Error("Could not obtain API credentials. " + createErr.message)
+                    }
                 }
             }
 
@@ -606,7 +627,17 @@ const UserPortfolio = ({ onStateChange }) => {
         }
     }
 
+    // Poll for positions updates (keep synced with FocusedMarketView trades)
+    useEffect(() => {
+        if (!address) return
+        const interval = setInterval(() => {
+            fetchPositions(address)
+        }, 5000) // Poll every 5s
+        return () => clearInterval(interval)
+    }, [address])
+
     const disconnect = () => {
+
         // Clear session from localStorage
         localStorage.removeItem(SESSION_KEY)
         localStorage.removeItem(PROXY_ADDRESS_KEY) // Clear persisted proxy address
