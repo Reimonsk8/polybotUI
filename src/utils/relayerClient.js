@@ -20,7 +20,7 @@ import { BuilderConfig } from '@polymarket/builder-signing-sdk'
 import { addLog, STEP_STATUS } from './debugLogger'
 
 // Polymarket Contract Addresses on Polygon
-const CONTRACTS = {
+export const CONTRACTS = {
     USDCe: '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
     CTF: '0x4d97dcd97ec945f40cf65f87097ace5ea0476045',
     CTF_Exchange: '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E',

@@ -5,9 +5,19 @@ import ConfirmModal from './Portfolio/ConfirmModal'
 import { placeMarketOrder, getSyncedNonce } from '../utils/marketOrders'
 import './FocusedMarketView.css'
 
-const FocusedMarketView = ({ event, client, userAddress, positions = [] }) => {
+const FocusedMarketView = ({ event, client, userAddress, positions = [], privateKey, builderCreds }) => {
     const market = event.markets?.[0]
     const outcomes = JSON.parse(market?.outcomes || '[]')
+
+    // DEBUG: Check Credentials
+    useEffect(() => {
+        console.log('[FocusedMarketView] Props Check:', {
+            hasClient: !!client,
+            hasKey: !!privateKey,
+            hasBuilderCreds: !!builderCreds,
+            builderKeyPrefix: builderCreds?.key ? builderCreds.key.slice(0, 4) : 'N/A'
+        })
+    }, [client, privateKey, builderCreds])
 
     // Outcome Pricing State
     const [priceHistory, setPriceHistory] = useState([])
@@ -65,6 +75,12 @@ const FocusedMarketView = ({ event, client, userAddress, positions = [] }) => {
 
     // Countdown State
     const [timeLeft, setTimeLeft] = useState('')
+
+    // Transaction Mutex (Moved to top to fix Hook Rule)
+    const isSubmittingRef = useRef(false)
+    useEffect(() => {
+        return () => { isSubmittingRef.current = false } // Cleanup on unmount
+    }, [])
 
 
 
@@ -166,11 +182,12 @@ const FocusedMarketView = ({ event, client, userAddress, positions = [] }) => {
 
                     if (config.active && config.targetReturn && bestAskPrice > 0 && !isLocked) {
                         const potentialReturn = 1 / bestAskPrice
+                        const roundedReturn = parseFloat(potentialReturn.toFixed(2))
 
                         // Debug log every update to verify it's checking
                         // console.log(`[AutoBuy Check] ${type} Return: ${potentialReturn.toFixed(2)}x vs Target: ${config.targetReturn}x | Locked: ${isLocked}`)
 
-                        if (potentialReturn >= parseFloat(config.targetReturn)) {
+                        if (roundedReturn >= parseFloat(config.targetReturn)) {
 
                             // Check Client FIRST before locking
                             const { tradeAmount, client } = stateRef.current
@@ -521,12 +538,8 @@ const FocusedMarketView = ({ event, client, userAddress, positions = [] }) => {
     }
 
     // STEP B: Confirm & Execute (Double-Check & Submit)
-    const isSubmittingRef = useRef(false)
-
-    // Unlock on unmount to be safe
-    useEffect(() => {
-        return () => { isSubmittingRef.current = false }
-    }, [])
+    // isSubmittingRef Moved to top
+    // useEffect Moved to top
 
     const confirmTrade = async (tradeOverride = null) => {
         // Use override if provided (Fast Buy), else use State (Modal Confirm)
@@ -579,7 +592,10 @@ const FocusedMarketView = ({ event, client, userAddress, positions = [] }) => {
                     currentTrade.estCost, // Send Dollars
                     {
                         slippage: 0.10,
-                        sizeInDollars: true
+                        sizeInDollars: true,
+                        useGasless: true,
+                        privateKey, // Passed from props
+                        builderCreds // Passed from props
                     }
                 )
             }
@@ -757,7 +773,9 @@ const FocusedMarketView = ({ event, client, userAddress, positions = [] }) => {
                     <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
                         <img src={event.icon} alt="" style={{ width: 56, height: 56, borderRadius: '50%' }} onError={e => e.target.style.display = 'none'} />
                         <div>
-                            <h2 style={{ fontSize: '1.8rem', margin: 0, letterSpacing: '-0.5px' }}>{event.title}</h2>
+                            <a href={`https://polymarket.com/event/${event.slug}`} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none', color: 'inherit' }}>
+                                <h2 style={{ fontSize: '1.8rem', margin: 0, letterSpacing: '-0.5px' }}>{event.title}</h2>
+                            </a>
                             <div className="focused-meta">
                                 <span style={{
                                     color: '#f59e0b',

@@ -43,17 +43,37 @@ app.use((req, res, next) => {
 });
 
 // Proxy endpoint for Polymarket API
+// Proxy endpoint for Polymarket API
 app.get('/api/data', async (req, res) => {
     try {
-        const { tag_id, limit = 20, active = 'true', closed = 'false' } = req.query;
+        const { tag_id, limit = 20, active = 'true', closed = 'false', asset = 'bitcoin', timeframe = 'daily' } = req.query;
+
+        // Map Assets to Tag IDs
+        const ASSET_TAGS = {
+            'bitcoin': '235',
+            // 'ethereum': '210', // Invalid, fallback to generic
+            // 'solana': '217',   // Invalid, fallback to generic
+            // 'xrp': '257'       // Invalid, fallback to generic
+        };
 
         const url = new URL('https://gamma-api.polymarket.com/events');
         url.searchParams.append('active', active);
         url.searchParams.append('closed', closed);
-        url.searchParams.append('limit', limit);
-        if (tag_id) {
-            url.searchParams.append('tag_id', tag_id);
+
+        // Use Tag ID if available for the asset
+        const assetKey = asset.toLowerCase();
+        if (ASSET_TAGS[assetKey]) {
+            url.searchParams.append('tag_id', ASSET_TAGS[assetKey]);
+            // Increase limit slightly to ensure we get enough variance if needed, 
+            // but tag_id means results are highly relevant already.
+            url.searchParams.append('limit', '100');
+        } else {
+            // Fallback to generic limit if no tag found
+            url.searchParams.append('limit', limit);
+            if (tag_id) url.searchParams.append('tag_id', tag_id);
         }
+
+        console.log(`[Proxy] Fetching from Polymarket: ${url.toString()}`);
 
         const response = await fetch(url.toString());
 
@@ -63,13 +83,32 @@ app.get('/api/data', async (req, res) => {
 
         const data = await response.json();
 
-        // Filter for Bitcoin Up or Down markets
-        const btcMarkets = data.filter(event =>
-            event.title.toLowerCase().includes('bitcoin') &&
-            event.title.toLowerCase().includes('up or down')
-        );
+        // Secondary Client-Side Filter (Refined)
+        const filteredMarkets = data.filter(event => {
+            const title = event.title.toLowerCase();
+            const isAsset = title.includes(assetKey);
+            const isUpOrDown = title.includes('up or down');
 
-        res.json(btcMarkets);
+            // If we used a Tag ID, we can be less strict about the asset name 
+            // because the tag guarantees relevance (e.g. Tag 235 = Bitcoin, matches "BTC Up or Down")
+            const usedTag = !!ASSET_TAGS[assetKey];
+
+            // "Up or Down" is crucial for this specific app view.
+            if (!isUpOrDown) return false;
+
+            // Strict asset name check only if we didn't use a specific tag
+            if (!usedTag && !isAsset) return false;
+
+            // Timeframe filtering
+            if (timeframe === '15m') return title.includes('15 minute') || event.slug.includes('15m');
+            if (timeframe === '1h') return title.includes('1 hour') || event.slug.includes('1h');
+            if (timeframe === '4h') return title.includes('4 hour') || event.slug.includes('4h');
+
+            // Daily / Standard
+            return !title.includes('15 minute') && !title.includes('1 hour') && !title.includes('4 hour');
+        });
+
+        res.json(filteredMarkets);
     } catch (error) {
         console.error('Error fetching from Polymarket:', error);
         res.status(500).json({ error: error.message });
@@ -159,12 +198,7 @@ app.use((req, res) => {
 });
 
 // Start server only in local development (not on Vercel)
-if (process.env.NODE_ENV !== 'production') {
-    app.listen(PORT, () => {
-        console.log(`🚀 Proxy server running on http://localhost:${PORT}`);
-        console.log(`📊 Markets endpoint: http://localhost:${PORT}/api/data`);
-    });
-}
+// Start server check removed to prevent EADDRINUSE when imported by server.js
 
 // Export for Vercel serverless
 export default app;

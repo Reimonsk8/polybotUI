@@ -200,7 +200,7 @@ const UserPortfolio = ({ onStateChange }) => {
                     secret: import.meta.env.VITE_API_SECRET,
                     passphrase: import.meta.env.VITE_API_PASSPHRASE
                 }
-                if (envCreds.key && envCreds.secret && envCreds.passphrase) {
+                if (!activeCreds && envCreds.key && envCreds.secret) {
                     activeCreds = envCreds
                 }
             }
@@ -311,9 +311,11 @@ const UserPortfolio = ({ onStateChange }) => {
 
             if (!creds) {
                 try {
-                    creds = await l1Client.deriveApiKey()
-                    setApiCreds(creds)
-                    console.log('[L2 Login] Derived API credentials successfully')
+                    // FORCE CREATE NEW KEY to avoid stale/invalid derived keys (Fixes 401)
+                    // creds = await l1Client.deriveApiKey()
+                    // setApiCreds(creds)
+                    // console.log('[L2 Login] Derived API credentials successfully')
+                    throw new Error("Force Create")
                 } catch (deriveErr) {
                     try {
                         creds = await l1Client.createApiKey()

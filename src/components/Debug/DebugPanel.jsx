@@ -61,7 +61,7 @@ const DebugPanel = () => {
                 style={{
                     position: 'fixed',
                     bottom: '10px',
-                    right: '10px',
+                    left: '10px',
                     background: '#1a1a1a',
                     color: '#00cc00',
                     padding: '8px 12px',
@@ -82,7 +82,7 @@ const DebugPanel = () => {
         <div style={{
             position: 'fixed',
             bottom: '10px',
-            right: '10px',
+            left: '10px',
             width: '400px',
             height: '300px',
             background: '#0a0a0a',

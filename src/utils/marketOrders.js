@@ -15,30 +15,44 @@ import {
     placeGaslessSellOrder
 } from './relayerClient'
 import { addLog, STEP_STATUS } from './debugLogger'
+import { ethers } from 'ethers'
+import { CONTRACTS } from './relayerClient'
 
 // Time Sync Logic
 let timeOffset = 0
 let timeSynced = false
 
-async function syncTime() {
+export const syncTime = async () => {
     try {
-        const start = Date.now()
-        const res = await fetch('https://clob.polymarket.com/time')
-        const data = await res.json()
+        // Use CLOB endpoint which is reliable
+        const response = await fetch('https://clob.polymarket.com/time')
+        const text = await response.text()
 
-        // Helper to parse ISO string safely
-        const serverTime = new Date(data.time).getTime()
-        const end = Date.now()
-        const latency = (end - start) / 2
+        let serverTimeMs = Date.now()
+        try {
+            // Try JSON first
+            const json = JSON.parse(text)
+            if (json.iso) {
+                serverTimeMs = new Date(json.iso).getTime()
+            } else if (json.timestamp) {
+                serverTimeMs = json.timestamp * 1000 // usually seconds
+            } else if (typeof json === 'number') {
+                serverTimeMs = json * 1000
+            }
+        } catch (e) {
+            // If text is just a number string
+            if (!isNaN(text)) {
+                serverTimeMs = parseInt(text) * 1000
+            }
+        }
 
-        // Calculate offset: Server - Local
-        timeOffset = serverTime - (end - latency)
-        timeSynced = true
-        console.log(`[TimeSync] Synced! Offset: ${timeOffset}ms`)
+        const localTime = Date.now()
+        timeOffset = serverTimeMs - localTime
+        console.log(`[TimeSync] Synced. Offset: ${timeOffset}ms (Server: ${serverTimeMs})`)
         addLog('TimeSync', `Synced. Offset: ${Math.round(timeOffset)}ms`, STEP_STATUS.INFO)
     } catch (e) {
-        console.warn('[TimeSync] Failed', e)
-        addLog('TimeSync', 'Failed to sync time', STEP_STATUS.WARNING)
+        console.warn('Time sync failed, defaulting to 0', e)
+        timeOffset = 0
     }
 }
 // Attempt sync immediately
@@ -140,7 +154,9 @@ async function placeStandardMarketOrder(client, tokenId, side, size, options = {
 
             // For BUY, size can be in dollars - convert to shares
             if (options.sizeInDollars) {
-                orderSize = size / bestPrice // Convert dollars to shares
+                // Convert dollars to shares and add a small buffer (0.1%) to ensure order value > $1
+                // This prevents "400 Bad Request: invalid amount ... ($0.9999)" due to float precision
+                orderSize = (size / bestPrice) * 1.001
             }
         } else if (side === "SELL" || side === "sell") {
             // To sell, we match against bids (buyers)
@@ -185,6 +201,59 @@ async function placeStandardMarketOrder(client, tokenId, side, size, options = {
         if (marketPrice < 0.01) marketPrice = 0.01
 
         console.log(`[Market Order] Price with Slippage: ${marketPrice.toFixed(4)} (Base: ${bestPrice}, Slippage: ${slippage * 100}%)`)
+
+        // 4.5. Check & Approve Allowance (Fallback for Standard Execution)
+        // Only works if we have the private key and MATIC for gas
+        if (options.privateKey && side.toUpperCase() === 'BUY') {
+            try {
+                console.log("[Market Order] Checking USDC Allowance (Standard)...")
+                const provider = new ethers.providers.JsonRpcProvider("https://polygon.drpc.org")
+                const wallet = new ethers.Wallet(options.privateKey, provider)
+
+                // USDC Contract
+                const usdcAbi = [
+                    "function allowance(address owner, address spender) view returns (uint256)",
+                    "function approve(address spender, uint256 amount) returns (bool)"
+                ]
+                const usdc = new ethers.Contract(CONTRACTS.USDCe, usdcAbi, wallet)
+                const spender = CONTRACTS.CTF_Exchange
+
+                // Check Allowance
+                // Estimate cost: orderSize * marketPrice (approx)
+                // Safety: Check against $1000 or full balance? Best to verify specific amount.
+                // Since we don't have exact USDC amount handy (orderSize is shares), we estimate.
+                const estimatedCostUsdc = orderSize * marketPrice
+                const requiredAllowance = ethers.utils.parseUnits(Math.ceil(estimatedCostUsdc).toString(), 6)
+
+                const currentAllowance = await usdc.allowance(wallet.address, spender)
+
+                if (currentAllowance.lt(requiredAllowance)) {
+                    console.log("[Market Order] Allowance too low. Approving...", currentAllowance.toString(), requiredAllowance.toString())
+                    addLog('Market Order', 'Approving USDC (Standard)', STEP_STATUS.PENDING)
+
+                    try {
+                        const tx = await usdc.approve(spender, ethers.constants.MaxUint256)
+                        await tx.wait()
+
+                        console.log("[Market Order] Approval Confirmed!", tx.hash)
+                        addLog('Market Order', 'USDC Approved', STEP_STATUS.SUCCESS, { tx: tx.hash })
+                    } catch (approveErr) {
+                        console.error("[Market Order] Approval Tx Failed:", approveErr)
+                        throw new Error(`Approval failed: ${approveErr.message || "Insufficient funds for gas?"}`)
+                    }
+                } else {
+                    console.log("[Market Order] Allowance sufficient.")
+                }
+            } catch (err) {
+                console.warn("[Market Order] Helper Error:", err)
+                // If it was the approval error we just threw, rethrow it to stop execution
+                if (err.message.includes('Approval failed')) throw err
+
+                // Otherwise, it might be a read error? We probably shouldn't continue but let's be careful.
+                addLog('Market Order', 'Pre-flight Check Failed', STEP_STATUS.WARNING, { error: err.message })
+                throw err // STOP EXECUTION
+            }
+        }
 
         // 5. Generate nonce with Time Offset
         const nonce = getSyncedNonce()

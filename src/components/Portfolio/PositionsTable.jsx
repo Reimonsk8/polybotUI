@@ -27,7 +27,11 @@ const PositionsTable = ({ positions }) => {
                     <tbody>
                         {positions.map((pos, idx) => (
                             <tr key={idx}>
-                                <td className="market-name">{pos.title}</td>
+                                <td className="market-name">
+                                    <a href={`https://polymarket.com/event/${pos.slug}`} target="_blank" rel="noopener noreferrer" style={{ textDecoration: 'none', color: 'inherit' }}>
+                                        {pos.title}
+                                    </a>
+                                </td>
                                 <td>
                                     <span className={`outcome-tag ${pos.outcome}`}>
                                         {pos.outcome}

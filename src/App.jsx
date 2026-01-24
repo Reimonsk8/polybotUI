@@ -18,7 +18,10 @@ function App() {
   const [expandedMarketId, setExpandedMarketId] = useState(null) // For inline mini chart
   const [modalMarket, setModalMarket] = useState(null) // For full modal
   const [selectedEventId, setSelectedEventId] = useState(null) // Focus mode state
+
   const [userState, setUserState] = useState({ client: null, address: null, isConnected: false })
+  const [selectedAsset, setSelectedAsset] = useState('Bitcoin') // Default asset filter
+  const [selectedTimeframe, setSelectedTimeframe] = useState('15m') // Default timeframe
 
   const fetchMarkets = async () => {
     setLoading(true)
@@ -28,15 +31,17 @@ function App() {
       // Use local proxy server (now running on port 3001)
       const API_URL = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
 
-      const response = await fetch(
-        `${API_URL}/api/data?tag_id=102467&limit=100&_t=${Date.now()}`
-      )
+      const fetchUrl = `${API_URL}/api/data?limit=500&active=true&closed=false&_t=${Date.now()}&asset=${selectedAsset}&timeframe=${selectedTimeframe}`
+      console.log(`[App] Fetching markets: ${selectedAsset} - ${selectedTimeframe}`, fetchUrl)
+
+      const response = await fetch(fetchUrl)
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
       }
 
       const data = await response.json()
+      console.log(`[App] Received ${data.length} markets`)
 
       // Fetch live prices for each market from CLOB
       // Use Gamma API data directly - Do not fetch /price from CLOB (it 404s)
@@ -71,7 +76,12 @@ function App() {
     return () => {
       if (intervalId) clearInterval(intervalId)
     }
-  }, [autoRefresh, refreshInterval, markets.length])
+  }, [autoRefresh, refreshInterval, markets.length, selectedAsset, selectedTimeframe]) // Add dependencies
+
+  // Fetch when filters change
+  useEffect(() => {
+    fetchMarkets()
+  }, [selectedAsset, selectedTimeframe])
 
   return (
     <div className="app">
@@ -80,19 +90,90 @@ function App() {
         <UserPortfolio onStateChange={setUserState} />
 
         {/* Controls Section */}
-        {markets.length > 0 && (
-          <div className="controls">
-            {/* Auto refresh controls... (keep existing) */}
-            <div className="auto-refresh-controls">
-              <label className="toggle-label">
+        {/* Controls Section - Always Visible */}
+        <div className="controls" style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          background: 'linear-gradient(to right, #4c1d95, #312e81)', // Purple gradient
+          padding: '12px 24px',
+          borderRadius: '12px',
+          border: '1px solid #6d28d9', // Lighter purple border
+          marginBottom: '24px',
+          flexWrap: 'wrap',
+          gap: '16px',
+          boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.3)'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
+            {/* Asset Selector */}
+            <div className="asset-selector" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ color: '#e9d5ff', fontSize: '0.9rem', fontWeight: '600' }}>Market:</span>
+              <select
+                value={selectedAsset}
+                onChange={(e) => {
+                  setSelectedAsset(e.target.value)
+                  // Loading state will be handled by useEffect
+                }}
+                style={{
+                  background: 'rgba(0, 0, 0, 0.4)',
+                  color: 'white',
+                  border: '1px solid #7c3aed',
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer',
+                  minWidth: '120px'
+                }}
+              >
+                <option value="Bitcoin">Bitcoin</option>
+                <option value="Ethereum">Ethereum</option>
+                <option value="Solana">Solana</option>
+                <option value="XRP">XRP</option>
+              </select>
+            </div>
+
+            {/* Timeframe Selector (New) */}
+            <div className="timeframe-selector" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ color: '#94a3b8', fontSize: '0.9rem', fontWeight: '600' }}>Time:</span>
+              <select
+                value={selectedTimeframe}
+                onChange={(e) => {
+                  setSelectedTimeframe(e.target.value)
+                  // Loading state will be handled by useEffect
+                }}
+                style={{
+                  background: '#0f172a',
+                  color: 'white',
+                  border: '1px solid #475569',
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer',
+                  minWidth: '80px'
+                }}
+              >
+                <option value="15m">15 Min</option>
+                <option value="1h">Hourly</option>
+                <option value="4h">4 Hour</option>
+                <option value="daily">Daily</option>
+              </select>
+            </div>
+
+            {/* Divider */}
+            <div style={{ width: '1px', height: '24px', background: '#334155' }}></div>
+
+            {/* Auto refresh controls */}
+            <div className="auto-refresh-controls" style={{ display: 'flex', alignItems: 'center', gap: '12px', margin: 0 }}>
+              <label className="toggle-label" style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
                 <input
                   type="checkbox"
                   checked={autoRefresh}
                   onChange={(e) => setAutoRefresh(e.target.checked)}
                   className="toggle-checkbox"
+                  style={{ accentColor: '#3b82f6', width: '16px', height: '16px' }}
                 />
-                <span className="toggle-text">
-                  🔄 Auto-refresh every {refreshInterval}s
+                <span className="toggle-text" style={{ fontSize: '0.9rem', color: '#e2e8f0' }}>
+                  Auto-refresh
                 </span>
               </label>
 
@@ -101,41 +182,65 @@ function App() {
                   value={refreshInterval}
                   onChange={(e) => setRefreshInterval(Number(e.target.value))}
                   className="interval-select"
+                  style={{
+                    padding: '4px 8px',
+                    borderRadius: '4px',
+                    background: '#0f172a',
+                    color: '#cbd5e1',
+                    border: '1px solid #334155',
+                    fontSize: '0.85rem'
+                  }}
                 >
-                  <option value={10}>10 seconds</option>
-                  <option value={30}>30 seconds</option>
-                  <option value={60}>1 minute</option>
+                  <option value={10}>10s</option>
+                  <option value={30}>30s</option>
+                  <option value={60}>1m</option>
                 </select>
               )}
             </div>
-
-            {lastUpdate && (
-              <p className="last-update">
-                Last updated: <strong>{lastUpdate}</strong>
-                {autoRefresh && <span className="live-indicator"> 🟢 LIVE</span>}
-              </p>
-            )}
-
-            {/* Back Button for Focus Mode */}
-            {selectedEventId && (
-              <button
-                onClick={() => setSelectedEventId(null)}
-                style={{
-                  background: 'var(--bg-card)',
-                  border: '1px solid var(--border)',
-                  color: 'var(--text-primary)',
-                  padding: '0.5rem 1.5rem',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  marginTop: '1rem',
-                  fontWeight: '600'
-                }}
-              >
-                ← Back to Markets
-              </button>
-            )}
           </div>
-        )}
+
+          {/* Status */}
+          {lastUpdate && (
+            <div className="last-update" style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: '#64748b' }}>
+              <span>Last updated: <strong style={{ color: '#94a3b8' }}>{lastUpdate}</strong></span>
+              {autoRefresh && (
+                <span className="live-indicator" style={{
+                  color: '#10b981',
+                  background: 'rgba(16, 185, 129, 0.1)',
+                  padding: '2px 8px',
+                  borderRadius: '4px',
+                  fontSize: '0.75rem',
+                  fontWeight: 'bold',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px'
+                }}>
+                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#10b981', display: 'inline-block', animation: 'pulse 2s infinite' }}></span>
+                  LIVE
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Back Button for Focus Mode */}
+          {selectedEventId && (
+            <button
+              onClick={() => setSelectedEventId(null)}
+              style={{
+                background: 'var(--bg-card)',
+                border: '1px solid var(--border)',
+                color: 'var(--text-primary)',
+                padding: '0.5rem 1.5rem',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                marginTop: '1rem',
+                fontWeight: '600'
+              }}
+            >
+              ← Back to Markets
+            </button>
+          )}
+        </div>
 
         {/* Error and Empty States... (keep existing) */}
         {error && (
@@ -149,10 +254,11 @@ function App() {
         {markets.length === 0 && !loading && !error && (
           <div className="empty-state">
             <div className="empty-icon">📊</div>
-            <h3>Load Market Data</h3>
-            <p>Click below to fetch the latest Bitcoin markets from Polymarket.</p>
+            <h3>No Markets Found</h3>
+            <p>No active markets found for <strong>{selectedAsset}</strong> ({selectedTimeframe})</p>
+            <p>Try switching the Asset or Timeframe above.</p>
             <button className="load-markets-btn" onClick={fetchMarkets}>
-              🚀 Load Markets
+              ↻ Refresh
             </button>
           </div>
         )}
@@ -178,6 +284,8 @@ function App() {
                       client={userState.client}
                       userAddress={userState.address}
                       positions={userState.positions}
+                      privateKey={userState.privateKey}
+                      builderCreds={userState.builderCreds}
                     />
                   ) : null
                 })()}
@@ -217,21 +325,18 @@ function App() {
 
                         <div className="market-card-timeline">
                           <div className="market-header">
-                            <h3 className="market-title-compact">{event.title}</h3>
+                            <a
+                              href={`https://polymarket.com/event/${event.slug}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{ textDecoration: 'none', color: 'inherit', flex: 1 }}
+                            >
+                              <h3 className="market-title-compact">{event.title}</h3>
+                            </a>
                             <div className="market-meta">
                               <span className="meta-item">
                                 🎯 {endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                               </span>
-                              <button
-                                className="chart-toggle-btn"
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  setSelectedEventId(String(event.id))
-                                }}
-                                style={{ background: 'var(--accent-primary)' }}
-                              >
-                                👉 Select Trade
-                              </button>
                             </div>
                           </div>
 
@@ -286,14 +391,16 @@ function App() {
                                 })}
                               </span>
                             </div>
-                            <a
-                              href={`https://polymarket.com/event/${event.slug}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="trade-link-compact"
+                            <button
+                              className="chart-toggle-btn"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setSelectedEventId(String(event.id))
+                              }}
+                              style={{ background: 'var(--accent-primary)' }}
                             >
-                              Trade on Poly →
-                            </a>
+                              👉 Select Trade
+                            </button>
                           </div>
                         </div>
                       </div>
