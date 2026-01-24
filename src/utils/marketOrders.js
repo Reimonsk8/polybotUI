@@ -25,7 +25,7 @@ let timeSynced = false
 export const syncTime = async () => {
     try {
         // Use CLOB endpoint which is reliable
-        const response = await fetch('https://clob.polymarket.com/time')
+        const response = await fetch('/clob/time')
         const text = await response.text()
 
         let serverTimeMs = Date.now()

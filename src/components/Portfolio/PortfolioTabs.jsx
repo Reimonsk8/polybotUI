@@ -83,9 +83,7 @@ const PortfolioTabs = ({
                 sortDirection: 'DESC'
             })
 
-            const positionsUrl = useProxy
-                ? `${proxyUrl}/api/data-api/positions?${params.toString()}`
-                : `https://data-api.polymarket.com/positions?${params.toString()}`
+            const positionsUrl = `/data-api/positions?${params.toString()}`
 
             const response = await fetch(positionsUrl)
             if (!response.ok) {
@@ -219,7 +217,7 @@ const PortfolioTabs = ({
                                 // OPTION B: Raw Fetch (Fallback)
                                 if (!priceFound) {
                                     try {
-                                        const clobRes = await fetch(`https://clob.polymarket.com/price?token_id=${pos.asset}&side=sell`)
+                                        const clobRes = await fetch(`/clob/price?token_id=${pos.asset}&side=sell`)
                                         if (clobRes.ok) {
                                             const clobData = await clobRes.json()
                                             if (clobData.price) {
@@ -294,9 +292,7 @@ const PortfolioTabs = ({
                     const proxyUrl = import.meta.env.VITE_PROXY_API_URL || 'http://localhost:3001'
                     const useProxy = import.meta.env.VITE_USE_PROXY !== 'false'
 
-                    const url = useProxy
-                        ? `${proxyUrl}/api/data-api/activity?user=${traderAddress}&limit=5`
-                        : `https://data-api.polymarket.com/activity?user=${traderAddress}&limit=5`
+                    const url = `/data-api/activity?user=${traderAddress}&limit=5`
 
                     const res = await fetch(url)
                     if (!res.ok) continue

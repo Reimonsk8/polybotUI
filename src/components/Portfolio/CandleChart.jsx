@@ -15,7 +15,7 @@ const CandleChart = ({ assetId, title, onClose }) => {
                 setLoading(true);
                 // Polymarket CLOB API endpoint for history
                 // params: interval (1m, 1h, 1d), market (asset_id)
-                const response = await fetch(`https://clob.polymarket.com/prices-history?interval=1h&market=${assetId}`);
+                const response = await fetch(`/clob/prices-history?interval=1h&market=${assetId}`);
 
                 if (!response.ok) {
                     throw new Error('Failed to fetch history');

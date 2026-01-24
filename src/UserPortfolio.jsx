@@ -76,8 +76,10 @@ const UserPortfolio = ({ onStateChange }) => {
                             const savedSigType = session.signatureType !== undefined ? session.signatureType : 0
                             const savedProxy = session.proxyAddress || session.address
 
+                            // Force absolute URL for ClobClient to prevent fallback to default
+                            const proxyUrl = getProxyUrl();
                             const l2Client = new ClobClient(
-                                "https://clob.polymarket.com",
+                                proxyUrl,
                                 chainId,
                                 signer,
                                 session.apiCreds,
@@ -219,7 +221,7 @@ const UserPortfolio = ({ onStateChange }) => {
 
     const fetchPortfolioValue = async (userAddress) => {
         try {
-            const res = await fetch(`https://data-api.polymarket.com/value?user=${userAddress}`)
+            const res = await fetch(`/data-api/value?user=${userAddress}`)
             if (res.ok) {
                 const data = await res.json()
                 // Handle different response formats (raw number vs object)
@@ -266,7 +268,7 @@ const UserPortfolio = ({ onStateChange }) => {
             if (!proxyAddress) {
                 console.log('[L2 Login] No proxy in env, attempting API detection')
                 try {
-                    const posRes = await fetch(`https://data-api.polymarket.com/positions?user=${userAddress}&limit=1`)
+                    const posRes = await fetch(`/data-api/positions?user=${userAddress}&limit=1`)
                     if (posRes.ok) {
                         const posData = await posRes.json()
                         if (posData.length > 0 && posData[0].proxyWallet) {
@@ -282,7 +284,7 @@ const UserPortfolio = ({ onStateChange }) => {
             // Try Activity if still not found
             if (!proxyAddress) {
                 try {
-                    const actRes = await fetch(`https://data-api.polymarket.com/activity?user=${userAddress}&limit=1`)
+                    const actRes = await fetch(`/data-api/activity?user=${userAddress}&limit=1`)
                     if (actRes.ok) {
                         const actData = await actRes.json()
                         if (actData.length > 0 && actData[0].proxyWallet) {
@@ -304,7 +306,8 @@ const UserPortfolio = ({ onStateChange }) => {
 
             // 2. Init L1 Client
             // ChainId 137 for Polygon
-            const l1Client = new ClobClient("https://clob.polymarket.com", 137, signer)
+            const proxyUrl = getProxyUrl();
+            const l1Client = new ClobClient(proxyUrl, 137, signer)
 
             // 3. Try to derive API Keys first (nonce 0), then create if needed
             let creds = apiCreds // Use existing if available (e.g. from session)
@@ -344,7 +347,7 @@ const UserPortfolio = ({ onStateChange }) => {
 
             // 5. Init L2 Client with full Auth
             const l2Client = new ClobClient(
-                "https://clob.polymarket.com",
+                proxyUrl, // Re-use the one defined above or from scope
                 137,
                 signer,
                 creds,
@@ -388,8 +391,8 @@ const UserPortfolio = ({ onStateChange }) => {
 
                 // IMPORTANT: Use proxyAddress (proxy wallet) not userAddress (regular wallet)
                 const profileUrl = useProxy
-                    ? `${proxyUrl}/gamma-api/public-profile?address=${proxyAddress}`
-                    : `https://gamma-api.polymarket.com/public-profile?address=${proxyAddress}`
+                    ? `${proxyUrl}/gamma-api/public-profile?address=${proxyAddress}` // Keep existing proxyUrl logic if user desires, but default to relative is safer in browser
+                    : `/gamma-api/public-profile?address=${proxyAddress}`
 
                 const profileRes = await fetch(profileUrl)
 
@@ -417,7 +420,7 @@ const UserPortfolio = ({ onStateChange }) => {
             if (!profileFound) {
                 try {
                     // Use PROXY address for activity lookup
-                    const activityRes = await fetch(`https://data-api.polymarket.com/activity?user=${proxyAddress}&limit=1`)
+                    const activityRes = await fetch(`/data-api/activity?user=${proxyAddress}&limit=1`)
 
                     if (activityRes.ok) {
                         const activityData = await activityRes.json()
@@ -447,7 +450,7 @@ const UserPortfolio = ({ onStateChange }) => {
 
             // 10. Fetch Closed Positions - Use PROXY address
             try {
-                const closedRes = await fetch(`https://data-api.polymarket.com/v1/closed-positions?user=${proxyAddress}&limit=50`)
+                const closedRes = await fetch(`/data-api/v1/closed-positions?user=${proxyAddress}&limit=50`)
                 if (closedRes.ok) {
                     const closedData = await closedRes.json()
 
@@ -539,8 +542,9 @@ const UserPortfolio = ({ onStateChange }) => {
             }
             setApiCreds(creds)
 
+            const proxyUrl = getProxyUrl();
             const l2Client = new ClobClient(
-                "https://clob.polymarket.com",
+                proxyUrl,
                 137,
                 undefined, // No Signer for L2-only
                 creds
@@ -611,7 +615,7 @@ const UserPortfolio = ({ onStateChange }) => {
 
     const fetchPositions = async (userAddress) => {
         try {
-            const positionsRes = await fetch(`https://data-api.polymarket.com/positions?user=${userAddress}`)
+            const positionsRes = await fetch(`/data-api/positions?user=${userAddress}`)
             if (positionsRes.ok) {
                 const positionsData = await positionsRes.json()
                 // Safely parse numbers to avoid NaN

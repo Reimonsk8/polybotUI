@@ -20,11 +20,26 @@ export default defineConfig({
   base: '/polybotUI/',
   server: {
     proxy: {
-      '/gamma-api': {
-        target: 'https://gamma-api.polymarket.com',
+      '/api': {
+        target: 'http://localhost:3001',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/gamma-api/, ''),
+        secure: false,
       },
+      '/clob': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+        secure: false,
+      },
+      '/gamma-api': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+        secure: false,
+      },
+      '/relayer': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+        secure: false,
+      }
     },
   },
 })

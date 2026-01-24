@@ -28,7 +28,7 @@ export const CONTRACTS = {
     NegRisk_Adapter: '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296'
 }
 
-const RELAYER_URL = 'https://relayer-v2.polymarket.com/'
+const RELAYER_URL = '/relayer/'
 const CHAIN_ID = 137 // Polygon
 
 /**

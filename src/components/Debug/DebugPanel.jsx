@@ -37,7 +37,7 @@ const DebugPanel = () => {
     const checkTimeSync = async () => {
         try {
             const start = Date.now()
-            const res = await fetch('https://clob.polymarket.com/time')
+            const res = await fetch('/clob/time')
             const serverData = await res.json()
             const end = Date.now()
 
